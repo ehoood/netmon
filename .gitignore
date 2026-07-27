@@ -1,0 +1,7 @@
+# local runtime files - never commit
+telegram.conf
+netmon_log.csv
+report.html
+netmon.cron.log
+__pycache__/
+*.pyc

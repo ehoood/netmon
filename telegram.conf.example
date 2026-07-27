@@ -1,0 +1,11 @@
+# Telegram credentials for the weekly report.
+# Copy this file to  telegram.conf  and fill in your values.
+#
+# BOT_TOKEN: from @BotFather (looks like 123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxx)
+#            You already have a bot - reuse its token.
+# CHAT_ID:   your personal chat id, or a group id (negative number).
+#            Easy way to find it: message your bot, then open
+#            https://api.telegram.org/bot<BOT_TOKEN>/getUpdates  and read "chat":{"id":...}
+
+BOT_TOKEN=PUT_YOUR_TOKEN_HERE
+CHAT_ID=PUT_YOUR_CHAT_ID_HERE
