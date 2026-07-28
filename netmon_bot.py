@@ -298,6 +298,10 @@ def handle(text, token, chat):
     cmd = parts[0].lower().split("@")[0]      # tolerate /speed@mybot in groups
     args = parts[1:]
 
+    # Audit trail: every accepted command, so `journalctl -u netmon-bot` answers
+    # "who ran what" alongside the rejected-chat lines from the poll loop.
+    log("command %s from chat %s" % (cmd, chat))
+
     if cmd in ("/help", "/start"):
         reply(token, chat, t(lang, "bot_help"))
     elif cmd in ("/speed", "/netmon", "/test"):
