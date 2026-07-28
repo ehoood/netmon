@@ -3,19 +3,27 @@
 """
 netmon.py - Single internet-quality measurement, appended to a CSV log.
 
-Designed to run on a Raspberry Pi wired to the main Deco, once per hour via cron.
-Measures download / upload / idle-latency / jitter / packet-loss and, crucially
-for a *shared* connection, latency-under-load (bufferbloat) and time-of-day.
+Runs on any Linux machine with a wired connection to your router - a Raspberry
+Pi, an old laptop, a NAS, a VM. Cron (or the Telegram bot) calls it on a fixed
+interval. It measures download / upload / idle latency / jitter / packet loss
+and, crucially for a congested line, latency-under-load (bufferbloat) plus the
+hour of day, so evenings can later be compared against quiet night hours.
 
 Zero Python dependencies (stdlib only). Requires an external speedtest tool:
   - Ookla official `speedtest`  (preferred - reports loaded latency / bufferbloat)
   - or python `speedtest-cli`   (fallback - no bufferbloat)
 plus the standard `ping` binary.
 
+Settings come from netmon.conf (see netmon_config.py); CLI flags override it.
+If ALERTS_ENABLED is on and Telegram credentials are configured, a measurement
+that falls below ALERT_THRESHOLD_PCT of your plan - or fails outright - sends
+an instant Telegram message, rate-limited by ALERT_COOLDOWN_MIN.
+
 Usage:
     ./netmon.py                         # append one row to ./netmon_log.csv
     ./netmon.py --csv /path/log.csv     # custom log location
     ./netmon.py --ping-host 8.8.8.8     # external baseline ping target
+    ./netmon.py --no-alert              # measure without alerting
 """
 
 import argparse
@@ -27,6 +35,10 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+
+import netmon_config as cfgmod
+from i18n import t
 
 # Columns written to the CSV. Keep order stable so old logs stay readable.
 FIELDS = [
@@ -180,11 +192,57 @@ def append_row(csv_path, row):
         w.writerow(full)
 
 
+def maybe_alert(cfg, row):
+    """Instant Telegram warning for a bad or failed measurement. Best effort."""
+    if not cfgmod.get_bool(cfg, "ALERTS_ENABLED"):
+        return
+    token, chat = cfgmod.creds(cfg)
+    if not token or not chat:
+        return
+
+    lang = cfgmod.lang(cfg)
+    plan = cfgmod.get_float(cfg, "PLAN_DOWN_MBPS")
+    threshold_pct = cfgmod.get_int(cfg, "ALERT_THRESHOLD_PCT")
+
+    if row["status"] == "ok":
+        dl = row.get("download_mbps")
+        if not plan or dl in (None, ""):
+            return
+        share = 100.0 * float(dl) / plan
+        if share >= threshold_pct:
+            return
+        text = t(lang, "alert_slow", float(dl), share, plan,
+                 row.get("ping_idle_ms", "—"), row.get("bufferbloat_ms", "—"),
+                 row.get("packet_loss_pct", "0"))
+    else:
+        text = t(lang, "alert_failed", (row.get("error") or "unknown error")[:300])
+
+    # Rate limit: a line that is down would otherwise alert on every run.
+    cooldown = cfgmod.get_int(cfg, "ALERT_COOLDOWN_MIN") * 60
+    try:
+        last = float(cfgmod.read_state().get("LAST_ALERT_EPOCH", 0))
+    except (TypeError, ValueError):
+        last = 0
+    now = time.time()
+    if cooldown and now - last < cooldown:
+        return
+
+    try:
+        import telegram_send as tg
+        tg.send_message(token, chat, text)
+        cfgmod.write_state({"LAST_ALERT_EPOCH": int(now)})
+    except Exception as e:                      # never let an alert break the cron run
+        print("alert not sent: %s" % e, file=sys.stderr)
+
+
 def main():
+    cfg = cfgmod.load()
     ap = argparse.ArgumentParser(description="One internet-quality measurement -> CSV")
-    ap.add_argument("--csv", default=DEFAULT_CSV, help="log file (default: netmon_log.csv beside script)")
-    ap.add_argument("--ping-host", default="1.1.1.1", help="external baseline ping target")
+    ap.add_argument("--csv", default=cfgmod.CSV_PATH, help="log file (default: netmon_log.csv beside script)")
+    ap.add_argument("--ping-host", default=cfg.get("PING_HOST") or "1.1.1.1",
+                    help="external baseline ping target")
     ap.add_argument("--no-ext-ping", action="store_true", help="skip the external baseline ping")
+    ap.add_argument("--no-alert", action="store_true", help="do not send a Telegram alert on a bad result")
     args = ap.parse_args()
 
     now = datetime.datetime.now().astimezone()
@@ -218,6 +276,8 @@ def main():
         row["tool"] = kind
 
     append_row(args.csv, row)
+    if not args.no_alert:
+        maybe_alert(cfg, row)
 
     if row["status"] == "ok":
         print("%s  down=%s Mbps  up=%s Mbps  ping=%s ms  bufferbloat=%s ms  loss=%s%%" % (

@@ -1,0 +1,45 @@
+# netmon configuration - copy to netmon.conf (install.sh does this for you).
+#
+#   cp netmon.conf.example netmon.conf && chmod 600 netmon.conf
+#
+# Every value can also be changed from Telegram: /config, /setplan,
+# /setinterval, /setalert, /setreport, /setping, /setlang.
+# netmon.conf holds your bot token - it is gitignored, keep it that way.
+
+# UI language for reports and bot replies: en | he
+LANG=en
+
+# The speeds your ISP sells you, in Mbps. The report compares against these.
+# Leave PLAN_UP_MBPS empty if you do not care about upload.
+PLAN_DOWN_MBPS=100
+PLAN_UP_MBPS=
+
+# Minutes between automatic measurements (5-1440). Each test moves a few
+# hundred MB, so raise this on a metered or very slow connection.
+INTERVAL_MINUTES=60
+
+# Independent baseline ping target, measured separately from the speedtest.
+PING_HOST=1.1.1.1
+
+# Telegram. Token from @BotFather; CHAT_ID is the only chat allowed to command
+# the bot (message your bot once, then run: ./netmon_bot.py --detect-chat).
+BOT_TOKEN=
+CHAT_ID=
+
+# Instant alert when a single measurement is bad. ALERT_COOLDOWN_MIN stops a
+# dead line from alerting on every run.
+ALERTS_ENABLED=1
+ALERT_THRESHOLD_PCT=50
+ALERT_COOLDOWN_MIN=120
+
+# Periodic HTML report pushed to Telegram. REPORT_DOW: 0=Sunday .. 6=Saturday.
+REPORT_ENABLED=1
+REPORT_DOW=0
+REPORT_HOUR=8
+
+# Hour windows compared in the report: "peak" vs a quiet reference window.
+# End hours are exclusive, so 18-24 means 18:00-23:59.
+PEAK_START=18
+PEAK_END=24
+OFFPEAK_START=2
+OFFPEAK_END=7

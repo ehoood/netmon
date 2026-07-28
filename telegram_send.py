@@ -4,7 +4,7 @@
 telegram_send.py - Minimal Telegram Bot API sender (stdlib only).
 
 Reusable for any bot. Sends a text message and/or a document (e.g. the HTML
-report). Credentials come from (in order): CLI flags, a config file, env vars
+report). Credentials come from (in order): CLI flags, netmon.conf, env vars
 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
 
 Config file format (KEY=VALUE, '#' comments allowed):
@@ -12,8 +12,8 @@ Config file format (KEY=VALUE, '#' comments allowed):
     CHAT_ID=123456789
 
 Usage:
-    ./telegram_send.py --config telegram.conf --text "hello"
-    ./telegram_send.py --config telegram.conf --document report.html --caption "weekly report"
+    ./telegram_send.py --text "hello"
+    ./telegram_send.py --document report.html --caption "weekly report"
     ./telegram_send.py --text "hi" --dry-run          # print, don't send
 """
 
@@ -102,7 +102,7 @@ def send_document(token, chat_id, path, caption="", timeout=120):
 
 def main():
     ap = argparse.ArgumentParser(description="Send a Telegram message and/or document")
-    ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram.conf"))
+    ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "netmon.conf"))
     ap.add_argument("--token")
     ap.add_argument("--chat-id")
     ap.add_argument("--text")

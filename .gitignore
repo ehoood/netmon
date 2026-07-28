@@ -1,7 +1,15 @@
-# local runtime files - never commit
+# local runtime files and secrets - never commit
+netmon.conf
 telegram.conf
 netmon_log.csv
 report.html
 netmon.cron.log
+netmon-bot.log
+PAUSED
+.netmon_state
+.netmon_state.tmp
 __pycache__/
 *.pyc
+
+# personal, machine-specific bots that happen to live in this checkout
+telegram-bot.js

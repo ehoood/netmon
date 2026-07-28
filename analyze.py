@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-analyze.py - Turn a week of netmon_log.csv into a readable report.
+analyze.py - Turn collected netmon_log.csv data into a readable terminal report.
+
+This one stays in English on purpose: it is the diagnostics view, meant for
+whoever administers the box. The shareable report (report.py) is translated.
 
 Zero dependencies. Prints:
   * overall stats (avg / median / p10 / min / max) for the key metrics
   * a by-hour-of-day table with an ASCII bar chart of average download
-  * peak-hour vs off-peak comparison (the tell-tale sign of an oversubscribed
-    shared line: fine at night, collapses in the evening)
+  * peak-hour vs off-peak comparison (the tell-tale sign of a congested or
+    oversubscribed line: fine at night, collapses in the evening)
   * flagged bad events (high packet loss, high bufferbloat, low speed)
+
+Plan speed and the peak/off-peak windows default to netmon.conf.
 
 Usage:
     ./analyze.py                       # reads ./netmon_log.csv
     ./analyze.py --csv /path/log.csv
-    ./analyze.py --plan 200            # compare against your 200 Mbps plan
+    ./analyze.py --plan 500            # compare against a 500 Mbps plan
 """
 
 import argparse
@@ -21,11 +26,9 @@ import csv
 import os
 import statistics as st
 
-DEFAULT_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netmon_log.csv")
+import netmon_config as cfgmod
 
-# Evening peak window for a residential shared line (local hours, inclusive).
-PEAK_HOURS = set(range(18, 24))          # 18:00-23:59
-OFFPEAK_HOURS = set(range(2, 7))         # 02:00-06:59 (quiet reference)
+DEFAULT_CSV = cfgmod.CSV_PATH
 
 
 def fnum(x):
@@ -83,11 +86,18 @@ def bar(value, vmax, width=32):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Analyze netmon CSV into a weekly report")
+    cfg = cfgmod.load()
+    ap = argparse.ArgumentParser(description="Analyze the netmon CSV into a terminal report")
     ap.add_argument("--csv", default=DEFAULT_CSV)
-    ap.add_argument("--plan", type=float, default=None,
-                    help="advertised plan Mbps, to compute %% of plan delivered")
+    ap.add_argument("--plan", type=float, default=cfgmod.get_float(cfg, "PLAN_DOWN_MBPS"),
+                    help="plan download Mbps, to compute %% of plan delivered (default: netmon.conf)")
     args = ap.parse_args()
+
+    # Peak / quiet windows come from the config so both reports agree.
+    peak_start, peak_end = cfgmod.get_int(cfg, "PEAK_START"), cfgmod.get_int(cfg, "PEAK_END")
+    off_start, off_end = cfgmod.get_int(cfg, "OFFPEAK_START"), cfgmod.get_int(cfg, "OFFPEAK_END")
+    peak_hours = set(range(peak_start, peak_end))
+    offpeak_hours = set(range(off_start, off_end))
 
     if not os.path.exists(args.csv):
         print("CSV not found: %s" % args.csv)
@@ -156,10 +166,11 @@ def main():
 
     # ---- peak vs off-peak ----------------------------------------------
     peak_dl = [fnum(r.get("download_mbps")) for r in ok
-               if fnum(r.get("hour_of_day")) in PEAK_HOURS and fnum(r.get("download_mbps"))]
+               if fnum(r.get("hour_of_day")) in peak_hours and fnum(r.get("download_mbps"))]
     off_dl = [fnum(r.get("download_mbps")) for r in ok
-              if fnum(r.get("hour_of_day")) in OFFPEAK_HOURS and fnum(r.get("download_mbps"))]
-    print("\n PEAK (18:00-23:59) vs OFF-PEAK (02:00-06:59)")
+              if fnum(r.get("hour_of_day")) in offpeak_hours and fnum(r.get("download_mbps"))]
+    print("\n PEAK (%02d:00-%02d:59) vs OFF-PEAK (%02d:00-%02d:59)" % (
+        peak_start, peak_end - 1, off_start, off_end - 1))
     if peak_dl and off_dl:
         pm, om = st.mean(peak_dl), st.mean(off_dl)
         drop = 100 * (1 - pm / om) if om else 0

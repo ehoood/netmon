@@ -1,91 +1,190 @@
-# netmon — ניטור איכות אינטרנט על Raspberry Pi
+# netmon — internet quality monitor with a Telegram bot
 
-ניטור אוטומטי של הקו המשותף בקיבוץ, שרץ מה‑RPi המחובר **בכבל** ל‑Deco הראשי.
-מודד מהירות הורדה/העלאה, פינג, jitter, אובדן חבילות, ו‑**bufferbloat**
-(עלייה בהשהיה תחת עומס — האינדיקטור הכי חשוב לקו משותף שנחנק).
+Measure what your internet connection actually delivers, around the clock, and
+get the evidence in your pocket.
 
-## למה מה‑Pi ולא מה‑Deco?
-ל‑Deco M5 **אין API רשמי**, ובדיקת המהירות המובנית היא פיצ'ר ענן שלא נגיש
-מבחוץ. הרצה מה‑Pi המחובר בכבל מודדת בדיוק את אותו קו — בלי WiFi — וזה גם
-הרבה יותר אמין.
+netmon runs on any always-on Linux box wired to your router — a Raspberry Pi, an
+old laptop, a NAS, a VM. It measures your line on a schedule, logs every result
+to a CSV, sends an instant Telegram alert when the line goes bad, and pushes a
+periodic HTML report with charts to your phone. You configure the whole thing
+from Telegram.
 
-## התקנה (על ה‑Pi)
-```bash
-# להעתיק את התיקייה ל-Pi, ואז:
-cd deco-netmon
-chmod +x install.sh
-./install.sh          # מתקין Ookla speedtest + מוסיף cron כל שעה + בודק מהירות כרטיס הרשת
+It is built for the argument you have with your ISP, your landlord or your
+building committee: *"the line is fine at 3 AM and unusable at 9 PM."* A week of
+hourly data settles that argument.
+
 ```
-המתקין:
-1. בודק את מהירות כרטיס הרשת (`ethtool`). **אם ה‑Pi הוא 100Mbit והקו מהיר יותר —
-   ה‑Pi הוא צוואר הבקבוק, לא האינטרנט.** ל‑Pi 4/5 יש גיגהביט אמיתי.
-2. מתקין את ה‑CLI הרשמי של Ookla (עם נפילה חלופית ל‑`speedtest-cli`).
-3. מוסיף משימת cron שרצה **כל שעה בשעה עגולה**, מוסיף שורה ל‑`netmon_log.csv`.
-4. מריץ מדידה אחת לבדיקה.
-
-## הרצה ידנית של מדידה בודדת
-```bash
-./netmon.py                     # מוסיף שורה ל-netmon_log.csv שליד הסקריפט
-./netmon.py --ping-host 8.8.8.8 # יעד פינג בסיס אחר
+📡 Measurement
+2026-07-28T22:00:01  down=336 Mbps  up=877 Mbps  ping=5.5 ms  bufferbloat=1.4 ms  loss=0%
 ```
 
-## הדוח השבועי (אחרי 5–7 ימים)
+## What it measures
+
+| Metric | Why it matters |
+|---|---|
+| Download / upload | What you actually get vs. what you pay for |
+| Idle latency + jitter | Baseline responsiveness |
+| **Bufferbloat** (latency under load) | Latency added *while the line is busy*. High bufferbloat is why video calls stutter while someone downloads — a speed number alone never shows it |
+| Packet loss | Sign of a saturated or faulty line |
+| Independent baseline ping | Sanity check that does not depend on the speedtest server |
+| Hour of day | Lets the report compare evening peak against quiet night hours |
+
+Everything is stdlib-only Python 3. No pip install, no node, no database.
+
+## Requirements
+
+- Linux with Python 3.7+, `cron`, and `ping`
+- A speedtest CLI — the installer sets up [Ookla `speedtest`](https://www.speedtest.net/apps/cli)
+  (preferred: it reports latency under load) and falls back to `speedtest-cli`
+- **A wired connection.** Over Wi-Fi you measure your Wi-Fi, not your internet
+- Optional: a Telegram account, for the bot
+
+## Install
+
 ```bash
-./analyze.py --plan 200         # 200 = המהירות שאתה אמור לקבל לפי החבילה, ב-Mbps
-```
-הדוח מראה:
-- סטטיסטיקה כללית (ממוצע/חציון/p10/מקס) לכל מדד.
-- **טבלה לפי שעה ביום** עם גרף — רואים מיד מתי הקו נחנק.
-- השוואת **שעות שיא (18:00–24:00) מול שעות שקטות (02:00–07:00)** — אם ההורדה
-  צונחת ב‑40%+ בערב, זה סימן מובהק לקו משותף ב‑over‑subscription.
-- האירועים הגרועים ביותר וכשלים (נפילות מלאות / רוויה).
-
-## מה לחפש בתור ראיה מול הקיבוץ
-- **צניחה גדולה בערב לעומת לילה** → יותר מדי משפחות על אותו pipe.
-- **bufferbloat גבוה (100ms+) תחת עומס** → אין ניהול תור/QoS, הקו נחנק.
-- **אובדן חבילות בשעות שיא** → הקו רווי לגמרי.
-- **פינג בסיס (idle) תקין אבל מהירות נמוכה** → זה חנק תפוקה, לא תקלת תשתית אצלך.
-
-## דוח HTML + שליחה אוטומטית בטלגרם
-הבוט הקיים שלך יכול לשלוח דוח שבועי מעוצב עם גרפים.
-
-1. ערוך את `telegram.conf` (נוצר אוטומטית מ‑`telegram.conf.example` בהתקנה):
-   ```
-   BOT_TOKEN=123456789:AA...    # הטוקן של הבוט הקיים שלך (מ-@BotFather)
-   CHAT_ID=123456789            # ה-chat id שלך (או של קבוצה, מספר שלילי)
-   ```
-   איך למצוא `CHAT_ID`: שלח הודעה לבוט, ואז פתח בדפדפן
-   `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates` וחפש `"chat":{"id":...}`.
-
-2. המתקין כבר הוסיף cron שרץ **כל יום ראשון ב‑08:00**, בונה דוח HTML ושולח אותו
-   לטלגרם (סיכום טקסט + קובץ HTML עם גרפים שנפתח בנייד).
-
-3. שליחה ידנית מתי שבא לך:
-   ```bash
-   ./report.py --plan 200 --telegram              # בונה ושולח
-   ./report.py --plan 200 --telegram --dry-run    # תצוגה מקדימה בלי לשלוח
-   ./report.py --plan 200 --html report.html      # רק בונה HTML מקומי
-   ```
-
-`telegram_send.py` הוא מודול עצמאי — אפשר להשתמש בו גם לבוט שלך לדברים אחרים:
-```bash
-./telegram_send.py --text "שלום" --document איזשהו_קובץ.pdf
+git clone https://github.com/ehoood/netmon.git
+cd netmon
+./install.sh
 ```
 
-## הערות מקצועיות
-- כל בדיקת מהירות "מרווה" את הקו לכמה שניות וצורכת נתונים (~0.5–1GB ליום ב‑200Mbps).
-  אחת לשעה זה איזון סביר. אפשר לשנות את התדירות ב‑crontab.
-- אל תריץ מכמה מכשירים במקביל — זה יטה את התוצאות.
-- הקובץ `netmon_log.csv` הוא CSV רגיל — אפשר לפתוח באקסל, או לשלוח לי אותו
-  אחרי שבוע ואבנה ויזואליזציה/דוח מסודר.
+The installer asks for — with hints for each — your language, the speed your ISP
+sells you, how often to measure, and your Telegram credentials. It then installs
+the speedtest CLI, writes `netmon.conf`, schedules measurements in cron, installs
+the bot as a systemd service, and runs one measurement so you see it work.
 
-## קבצים
-| קובץ | תפקיד |
-|------|--------|
-| `netmon.py`  | מדידה בודדת → שורה ב‑CSV (ללא תלויות, stdlib בלבד) |
-| `analyze.py` | דוח טקסט בטרמינל (ללא תלויות) |
-| `report.py`  | דוח HTML עם גרפים + שליחה לטלגרם (ללא תלויות) |
-| `telegram_send.py` | מודול שליחה לטלגרם (הודעה + קובץ), לשימוש חוזר |
-| `telegram.conf` | הטוקן וה‑chat id שלך (נוצר מ‑`.example`) |
-| `install.sh` | התקנת speedtest + cron (שעתי + שבועי) + בדיקת NIC |
-| `netmon_log.csv` | יומן המדידות (נוצר אוטומטית) |
+Non-interactive:
+
+```bash
+LANG_CODE=en PLAN_DOWN=500 PLAN_UP=800 INTERVAL=60 \
+BOT_TOKEN=123456:AA... CHAT_ID=987654321 ./install.sh --yes
+```
+
+### Setting up the Telegram bot
+
+1. **Get a token** — message [@BotFather](https://t.me/BotFather), send `/newbot`,
+   pick a name and a username ending in `bot`. He replies with a token that looks
+   like `8123456789:AAE...`.
+2. **Get your chat id** — send any message to your new bot, and the installer
+   detects the id automatically. To do it later:
+   `./netmon_bot.py --detect-chat`
+3. Only that chat id can command the bot.
+
+> One bot token can only be polled by one process. If the token is already used
+> by another bot of yours, create a second bot for netmon.
+
+Skip the token at install time and netmon still measures and logs — add
+credentials to `netmon.conf` whenever you want.
+
+## Bot commands
+
+| Command | What it does |
+|---|---|
+| `/speed` | Run a measurement right now (~40s) |
+| `/stats` | Summary of everything collected so far |
+| `/report` | Build the HTML report and send it to the chat |
+| `/status` | Is monitoring running, last result, sample count |
+| `/pause` · `/resume` | Stop / restart automatic measurements |
+| `/config` | Show every current setting |
+| `/setplan <down> [up]` | The speed your ISP sells you, Mbps |
+| `/setinterval <minutes>` | Time between measurements (5–1440) |
+| `/setalert <percent>` · `/setalert off` | Instant alert below this % of plan |
+| `/setreport <day> <hour>` · `/setreport off` | Periodic report (day 0=Sunday) |
+| `/setping <host>` | Baseline ping target |
+| `/setlang en\|he` | Language of reports and replies |
+| `/help` | The list above |
+
+Changing the interval or the report schedule rewrites the cron entries
+immediately — no shell needed.
+
+## Configuration
+
+Everything lives in `netmon.conf` (see `netmon.conf.example`), readable by hand
+and rewritten by the bot. It holds your bot token, so it is chmod 600 and
+gitignored.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LANG` | `en` | `en` or `he`; report, alerts and bot replies |
+| `PLAN_DOWN_MBPS` / `PLAN_UP_MBPS` | `100` / — | What your ISP sells you |
+| `INTERVAL_MINUTES` | `60` | Minutes between measurements |
+| `PING_HOST` | `1.1.1.1` | Independent baseline ping target |
+| `BOT_TOKEN` / `CHAT_ID` | — | Telegram credentials |
+| `ALERTS_ENABLED` | `1` | Instant alert on a bad measurement |
+| `ALERT_THRESHOLD_PCT` | `50` | Alert below this % of plan |
+| `ALERT_COOLDOWN_MIN` | `120` | Minimum minutes between alerts |
+| `REPORT_ENABLED` / `REPORT_DOW` / `REPORT_HOUR` | `1` / `0` / `8` | Periodic report, day 0=Sunday |
+| `PEAK_START` / `PEAK_END` | `18` / `24` | Peak window compared in the report |
+| `OFFPEAK_START` / `OFFPEAK_END` | `2` / `7` | Quiet reference window |
+
+From the shell:
+
+```bash
+./netmon_config.py --show
+./netmon_config.py --set INTERVAL_MINUTES=30      # also rewrites cron
+```
+
+## Reading the results
+
+```bash
+./analyze.py            # detailed terminal report (English)
+./report.py             # self-contained HTML report with charts
+./report.py --telegram  # …and send it to your chat
+```
+
+The HTML report is one offline file with inline SVG charts, so it opens straight
+from the Telegram attachment on a phone.
+
+What to look for after a week:
+
+- **Median download vs. plan.** Consistently below ~80% is worth a support call.
+- **The by-hour chart.** A line that is fast at 03:00 and slow at 21:00 is
+  congestion — either your ISP oversubscribed the segment, or a shared line is
+  carrying more households than it can.
+- **Bufferbloat above ~80 ms.** The line saturates without queue management. This
+  is what makes calls and games feel broken even when the speed number looks fine.
+- **Packet loss above ~1%.** Something is wrong on the line itself.
+- **Failed measurements.** Logged as rows too — those are outages.
+
+## Files
+
+| File | Role |
+|---|---|
+| `netmon.py` | One measurement → a CSV row, plus instant alerts |
+| `netmon_bot.py` | Standalone Telegram bot (long-polling, stdlib) |
+| `netmon_config.py` | Config load/save, validation, cron scheduling |
+| `report.py` | HTML report with SVG charts + Telegram send |
+| `analyze.py` | Detailed terminal report |
+| `telegram_send.py` | Minimal Telegram API sender |
+| `i18n.py` | Every user-facing string, en + he |
+| `install.sh` | Interactive setup |
+| `AGENTS.md` | Orientation for AI coding agents working on this repo |
+
+Runtime files that stay local and are gitignored: `netmon.conf`,
+`netmon_log.csv`, `report.html`, `netmon.cron.log`, `PAUSED`.
+
+## Troubleshooting
+
+**Speeds far below the plan, at every hour** — check the machine is not the
+bottleneck: `ethtool eth0 | grep Speed`. A 100 Mb NIC caps every result at ~95
+Mbps. Use a gigabit machine or a USB3 gigabit adapter.
+
+**Nothing is being measured** — `crontab -l` should show a netmon block. Check
+`netmon.cron.log`, and make sure the `PAUSED` file is not there (`/resume`).
+
+**The bot is silent** — `systemctl status netmon-bot`, then
+`journalctl -u netmon-bot -n 50`. A `409 Conflict` means another process is
+polling the same token.
+
+**Measurements fail with a license error** — run once by hand to accept it:
+`speedtest --accept-license --accept-gdpr`.
+
+## Privacy
+
+Measurements go to Ookla's speedtest servers (that is how a speedtest works) and
+results go only to your own Telegram chat. `netmon.conf` holds your bot token —
+it is gitignored; do not commit it or paste `/config` output publicly (the bot
+masks the token for exactly that reason).
+
+## License
+
+MIT. Use it, fork it, bring the charts to your ISP.
