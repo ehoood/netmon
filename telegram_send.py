@@ -29,6 +29,28 @@ import uuid
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
+# Telegram answers failures with a JSON body that says what is actually wrong.
+# urllib's HTTPError swallows it, leaving a bare "HTTP Error 400: Bad Request",
+# so unwrap it into something a user can act on.
+HINTS = {
+    "chat not found": "the bot cannot message this chat until you send it a message first "
+                      "(open the bot in Telegram and press Start)",
+    "bot was blocked by the user": "unblock the bot in Telegram",
+    "Unauthorized": "BOT_TOKEN is wrong or the bot was deleted in @BotFather",
+    "Conflict": "another process is polling this bot token",
+}
+
+
+class TelegramError(Exception):
+    """A Telegram API refusal, with the API's own explanation attached."""
+
+
+def _explain(code, description):
+    for needle, hint in HINTS.items():
+        if needle.lower() in (description or "").lower():
+            return "Telegram %s: %s - %s" % (code, description, hint)
+    return "Telegram %s: %s" % (code, description or "unknown error")
+
 
 def load_config(path):
     cfg = {}
@@ -52,8 +74,15 @@ def resolve_creds(args):
 
 def _post(url, data, headers, timeout=60):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode("utf-8", "ignore"))
+            raise TelegramError(_explain(e.code, body.get("description"))) from None
+        except (ValueError, AttributeError):
+            raise TelegramError("Telegram %s: %s" % (e.code, e.reason)) from None
 
 
 def send_message(token, chat_id, text, parse_mode="HTML", timeout=30):
@@ -131,8 +160,8 @@ def main():
         if args.document:
             r = send_document(token, chat, args.document, args.caption)
             print("sendDocument ok=%s" % r.get("ok"))
-    except urllib.error.HTTPError as e:
-        print("Telegram HTTP error %s: %s" % (e.code, e.read().decode("utf-8", "ignore")[:300]), file=sys.stderr)
+    except TelegramError as e:
+        print(str(e), file=sys.stderr)
         return 1
     except Exception as e:
         print("Telegram send failed: %s" % e, file=sys.stderr)
