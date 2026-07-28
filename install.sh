@@ -102,24 +102,40 @@ if ! command -v speedtest >/dev/null 2>&1 && ! command -v speedtest-cli >/dev/nu
 fi
 
 # --- 3. Questions ------------------------------------------------------------
+# Re-running the installer must be safe: whatever is already in netmon.conf
+# becomes the default answer, so pressing Enter through every prompt changes
+# nothing.
+# Always succeeds: a missing config is "no value", not an error, and under
+# `set -e` a non-zero return here would abort the whole installer.
+conf_get() { [ -f "$CONF" ] || return 0; sed -n "s/^$1=//p" "$CONF" | head -1; }
+
 echo
 c_b "Settings"
-echo "  Everything below is stored in netmon.conf and can be changed later,"
-echo "  by editing that file or straight from Telegram (/config, /setplan, ...)."
+if [ -f "$CONF" ]; then
+  echo "  Found an existing netmon.conf - its values are the defaults below,"
+  echo "  so pressing Enter everywhere keeps your current setup unchanged."
+else
+  echo "  Everything below is stored in netmon.conf and can be changed later,"
+  echo "  by editing that file or straight from Telegram (/config, /setplan, ...)."
+fi
 echo
 
-LANG_CODE="$(ask "  Language for reports and bot replies (en/he)" "${LANG_CODE:-en}")"
+LANG_CODE="$(ask "  Language for reports and bot replies (en/he)" "${LANG_CODE:-$(conf_get LANG)}")"
+LANG_CODE="${LANG_CODE:-en}"
 echo
 echo "  Your plan is what the report compares against - put in the numbers your"
 echo "  ISP sells you, not what you measured."
-PLAN_DOWN="$(ask "  Download speed you pay for, Mbps" "${PLAN_DOWN:-100}")"
-PLAN_UP="$(ask "  Upload speed you pay for, Mbps (optional)" "${PLAN_UP:-}")"
+PLAN_DOWN="$(ask "  Download speed you pay for, Mbps" "${PLAN_DOWN:-$(conf_get PLAN_DOWN_MBPS)}")"
+PLAN_DOWN="${PLAN_DOWN:-100}"
+PLAN_UP="$(ask "  Upload speed you pay for, Mbps (optional)" "${PLAN_UP:-$(conf_get PLAN_UP_MBPS)}")"
 echo
 echo "  How often to measure. Every 60 min is a good default: enough resolution"
 echo "  to see evening congestion, light enough not to disturb the household."
 echo "  Each test moves a few hundred MB - watch out on metered connections."
-INTERVAL="$(ask "  Minutes between measurements (5-1440)" "${INTERVAL:-60}")"
-PING_HOST="$(ask "  Host for the baseline ping" "${PING_HOST:-1.1.1.1}")"
+INTERVAL="$(ask "  Minutes between measurements (5-1440)" "${INTERVAL:-$(conf_get INTERVAL_MINUTES)}")"
+INTERVAL="${INTERVAL:-60}"
+PING_HOST="$(ask "  Host for the baseline ping" "${PING_HOST:-$(conf_get PING_HOST)}")"
+PING_HOST="${PING_HOST:-1.1.1.1}"
 
 echo
 c_b "Telegram"
@@ -140,8 +156,16 @@ cat <<'HINT'
   you can add credentials to netmon.conf later.
 HINT
 echo
-BOT_TOKEN="$(ask "  Bot token" "${BOT_TOKEN:-}")"
-CHAT_ID="${CHAT_ID:-}"
+EXISTING_TOKEN="$(conf_get BOT_TOKEN)"
+if [ -n "$EXISTING_TOKEN" ] && [ -z "${BOT_TOKEN:-}" ]; then
+  echo "  A bot token is already configured (${EXISTING_TOKEN%%:*}:...${EXISTING_TOKEN: -4})."
+  BOT_TOKEN="$(ask "  Bot token (Enter to keep the current one)" "")"
+  [ -z "$BOT_TOKEN" ] && BOT_TOKEN="$EXISTING_TOKEN"
+else
+  BOT_TOKEN="$(ask "  Bot token" "${BOT_TOKEN:-}")"
+fi
+# A chat id already on disk is trusted; only an unconfigured install detects one.
+CHAT_ID="${CHAT_ID:-$(conf_get CHAT_ID)}"
 
 # --- 4. Write the config -----------------------------------------------------
 set_conf() { "$PY" "$DIR/netmon_config.py" --set "$1=$2" >/dev/null; }
@@ -161,14 +185,27 @@ if [ -n "$BOT_TOKEN" ]; then
   fi
 fi
 
+BOT_WAS_RUNNING=0
 if [ -n "$BOT_TOKEN" ] && [ -z "$CHAT_ID" ]; then
   if interactive; then
+    # Detection long-polls getUpdates, and Telegram allows exactly one poller
+    # per token - so a bot already running here has to stand down first.
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet netmon-bot 2>/dev/null; then
+      BOT_WAS_RUNNING=1
+      sudo systemctl stop netmon-bot
+      echo "  (paused the running netmon bot so it does not clash with detection)"
+    fi
     echo
     echo "  Now send any message to your bot in Telegram."
     printf '  Waiting up to 120s for it '
     CHAT_ID="$("$PY" "$DIR/netmon_bot.py" --detect-chat --seconds 120 || true)"
     if [ -n "$CHAT_ID" ]; then
       c_ok "detected chat id: $CHAT_ID"
+      # Whoever messaged first wins, so let a human confirm it is really them.
+      CONFIRM="$(ask "  Use this chat id? (y/n)" "y")"
+      if [ "${CONFIRM,,}" != "y" ]; then
+        CHAT_ID="$(ask "  Enter the correct chat id" "")"
+      fi
     else
       c_wn "no message received."
       CHAT_ID="$(ask "  Enter your chat id manually (or leave empty to do it later)" "")"
@@ -209,7 +246,9 @@ if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
     INSTALL_SVC="$(ask "  Install the bot as a systemd service (starts on boot)? (y/n)" "y")"
     if [ "${INSTALL_SVC,,}" = "y" ]; then
       SVC=/etc/systemd/system/netmon-bot.service
-      sudo tee "$SVC" >/dev/null <<UNIT
+      # Installing a service needs root. If sudo is unavailable or refused,
+      # say so and fall back - never abort a working install over it.
+      if sudo tee "$SVC" >/dev/null <<UNIT
 [Unit]
 Description=netmon Telegram bot
 After=network-online.target
@@ -226,22 +265,35 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 UNIT
-      sudo systemctl daemon-reload
-      sudo systemctl enable --now netmon-bot >/dev/null 2>&1 || sudo systemctl restart netmon-bot
-      sleep 2
-      if [ "$(systemctl is-active netmon-bot)" = "active" ]; then
-        c_ok "  netmon-bot service is running. Send /help to your bot."
+      then
+        sudo systemctl daemon-reload || true
+        sudo systemctl enable netmon-bot >/dev/null 2>&1 || true
+        sudo systemctl restart netmon-bot >/dev/null 2>&1 || true
+        BOT_WAS_RUNNING=0
+        sleep 2
+        if [ "$(systemctl is-active netmon-bot 2>/dev/null)" = "active" ]; then
+          c_ok "  netmon-bot service is running. Send /help to your bot."
+        else
+          c_wn "  Service did not start. Check: sudo journalctl -u netmon-bot -n 30"
+        fi
+        c_wn "  NOTE: one bot token can only be polled by one process. If this token"
+        echo "     is already used by another bot of yours, create a second bot in"
+        echo "     @BotFather for netmon."
       else
-        c_wn "  Service did not start. Check: sudo journalctl -u netmon-bot -n 30"
+        c_wn "  Could not write $SVC (needs sudo). Everything else is set up;"
+        echo "     start the bot yourself with:"
+        echo "     nohup $PY $DIR/netmon_bot.py >> $DIR/netmon-bot.log 2>&1 &"
       fi
-      c_wn "  NOTE: one bot token can only be polled by one process. If this token"
-      echo "     is already used by another bot of yours, create a second bot in"
-      echo "     @BotFather for netmon."
     fi
   else
     c_wn "  No systemd here. Start the bot yourself, e.g.:"
     echo "     nohup $PY $DIR/netmon_bot.py >> $DIR/netmon-bot.log 2>&1 &"
   fi
+fi
+
+# Never leave a bot stopped that was running when this script started.
+if [ "$BOT_WAS_RUNNING" = 1 ]; then
+  sudo systemctl start netmon-bot >/dev/null 2>&1 && echo "  restarted the netmon bot."
 fi
 
 # --- 7. First measurement ----------------------------------------------------
