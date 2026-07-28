@@ -13,3 +13,6 @@ __pycache__/
 
 # personal, machine-specific bots that happen to live in this checkout
 telegram-bot.js
+
+# git bundles used to seed machines that cannot reach the remote
+*.bundle
