@@ -20,9 +20,14 @@ An internet-quality monitor for a single always-on Linux box. A cron job runs
    row with `status=error` and the message. A failed measurement is data — it is
    how outages show up in the report. Never let an exception escape, and never
    let an optional feature (an alert, a Telegram send) break the measurement.
-3. **The CSV schema is append-only.** `FIELDS` in `netmon.py` defines the column
-   order. Add new columns at the end; never reorder or rename, or every existing
-   log becomes unreadable. Readers use `csv.DictReader` and tolerate blanks.
+3. **The CSV schema is effectively frozen.** `FIELDS` in `netmon.py` defines the
+   column order. Never reorder or rename. And do not assume appending a column is
+   free: `append_row` writes the header only when the file is new, so on every
+   existing log a longer `FIELDS` produces rows *wider than the header* — the
+   extra value lands in `DictReader`'s `restkey` (`None`) and the column is
+   silently meaningless. Adding a column means migrating existing logs first.
+   This is why the calibrated server id is not a column: `server_name` already
+   identifies the server, and the id lives in `netmon.conf`.
 4. **`netmon.conf` is the single source of truth.** Not env vars, not CLI
    defaults, not constants in a module. CLI flags may override for one run.
 5. **Every user-facing string goes in `i18n.py`**, in both `en` and `he`. No
@@ -38,7 +43,7 @@ An internet-quality monitor for a single always-on Linux box. A cron job runs
 |---|---|
 | `netmon_config.py` | Config schema, validation, persistence, cron block, small state file |
 | `i18n.py` | All translated strings, `t(lang, key, *args)` |
-| `netmon.py` | One measurement, CSV append, instant alerts |
+| `netmon.py` | One measurement, server calibration, CSV append, instant alerts |
 | `report.py` | Aggregation (`summarize`), HTML/SVG, text summary, `build()` for reuse |
 | `analyze.py` | Terminal diagnostics (English) |
 | `telegram_send.py` | `send_message` / `send_document`, nothing else |
@@ -68,6 +73,18 @@ Dependency direction is one-way: `netmon_config` and `i18n` are leaves;
   without args. Keep that convention.
 - **RTL.** The Hebrew report is `dir="rtl"`, but SVG charts are forced to
   `direction:ltr` so numeric axes render correctly. Do not remove that.
+- **The measurement server is the biggest source of wrong numbers.** A speedtest
+  measures the server and the path to it as much as the line, and the
+  auto-selected nearest server is not reliably a good one — in the field this
+  produced a steady, believable 500 Mbps on a line that reached 940. Hence
+  `maybe_calibrate()`: try several servers, keep the fastest as `SERVER_ID`,
+  re-check every `CALIBRATE_DAYS`. The reasoning only works one way — a bad
+  server can understate a line but never overstate it — so *max* is the right
+  estimator here and mean is not. Do not "improve" it into an average.
+- **Calibration costs bandwidth.** Each speedtest transfers ~1.6 GB (measured on
+  a gigabit line). That is why it is weekly, not per-run, and why the installer
+  states the cost before spending it. Anything that makes it run more often
+  needs to justify the traffic.
 
 ## Testing without touching anything real
 
