@@ -240,14 +240,19 @@ NEAR_ENOUGH = 0.95
 PRESCREEN_FACTOR = 4
 
 
+def is_rate_limit(text):
+    """Is this failure the speedtest provider throttling us, not a network fault?"""
+    blob = (text or "").lower()
+    return "limit reached" in blob or "too many requests" in blob
+
+
 def rate_limited(results):
     """Name the failure when a provider is throttling us rather than broken.
 
     Worth distinguishing: "too many requests" clears by itself, so the right
     response is to wait, not to change anything about the configuration.
     """
-    blob = " ".join((r[5] or "") for r in results).lower()
-    if "limit reached" in blob or "too many requests" in blob:
+    if is_rate_limit(" ".join((r[5] or "") for r in results)):
         return "the speedtest provider is rate-limiting this machine"
     return ""
 
@@ -489,6 +494,11 @@ def maybe_alert(cfg, row):
                  row.get("ping_idle_ms", "—"), row.get("bufferbloat_ms", "—"),
                  row.get("packet_loss_pct", "0"))
     else:
+        # A provider throttling our requests is not an outage. Alerting on it
+        # would tell the user their internet is broken when it is not, and the
+        # failure clears by itself - the row is still logged either way.
+        if is_rate_limit(row.get("error")):
+            return
         text = t(lang, "alert_failed", (row.get("error") or "unknown error")[:300])
 
     # Rate limit: a line that is down would otherwise alert on every run.
