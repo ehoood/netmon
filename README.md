@@ -157,6 +157,8 @@ What to look for after a week:
 | `telegram_send.py` | Minimal Telegram API sender |
 | `i18n.py` | Every user-facing string, en + he |
 | `install.sh` | Interactive setup |
+| `diagnose.sh` | One-shot diagnosis: link speed & errors, up/down asymmetry, path hops, multi-server tests, verdict |
+| `DIAGNOSIS.md` | Worked example — diagnosing an asymmetric 600↓/900↑ line (upstream download shaping) with a message to send the provider |
 | `AGENTS.md` | Orientation for AI coding agents working on this repo |
 
 Runtime files that stay local and are gitignored: `netmon.conf`,
@@ -167,6 +169,13 @@ Runtime files that stay local and are gitignored: `netmon.conf`,
 **Speeds far below the plan, at every hour** — check the machine is not the
 bottleneck: `ethtool eth0 | grep Speed`. A 100 Mb NIC caps every result at ~95
 Mbps. Use a gigabit machine or a USB3 gigabit adapter.
+
+**Want a one-shot diagnosis right now** — run `./diagnose.sh` (better with
+`sudo`). It checks link speed and error counters, the **upload-vs-download
+ratio** (a download-only shortfall with healthy upload means the cap is upstream,
+not your hardware), the internal hops on the path, and several speedtest servers,
+then prints a verdict and saves a shareable report. See `DIAGNOSIS.md` for a
+worked example.
 
 **Nothing is being measured** — `crontab -l` should show a netmon block. Check
 `netmon.cron.log`, and make sure the `PAUSED` file is not there (`/resume`).
