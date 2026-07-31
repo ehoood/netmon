@@ -15,6 +15,10 @@
 #
 set -uo pipefail
 
+# ethtool lives in /usr/sbin, which is absent from a non-login shell's PATH.
+# Without this the script reports "ethtool not available" on a box that has it.
+PATH="$PATH:/usr/sbin:/sbin"
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="$DIR/diag_${STAMP}.txt"
@@ -41,6 +45,9 @@ echo "Iface  : ${IFACE:-unknown}   IP: ${LOCALIP:-?}   Gateway: ${GW:-?}"
 
 if command -v ethtool >/dev/null 2>&1 && [ -n "${IFACE:-}" ]; then
   echo "-- ethtool $IFACE --"
+  # Reading link settings needs CAP_NET_ADMIN; as a plain user ethtool answers
+  # "Operation not permitted" and the Speed/Duplex lines silently go missing.
+  [ "$(id -u)" -ne 0 ] && echo "  (not root: link speed & error counters need 'sudo ./diagnose.sh')"
   ethtool "$IFACE" 2>/dev/null | grep -Ei 'Speed|Duplex|Link detected' | sed 's/^/  /'
   SPEED="$(ethtool "$IFACE" 2>/dev/null | grep -i 'Speed:' | grep -oP '[0-9]+' | head -1)"
   echo "-- link error counters (should all be 0) --"
@@ -81,7 +88,7 @@ fi
 
 # --------------------------------------------------------------- 3. latency
 sec "3. LATENCY BASELINE"
-for t in "${GW:-} ${TARGETS[@]}"; do
+for t in "${GW:-}" "${TARGETS[@]}"; do
   [ -z "$t" ] && continue
   R=$(ping -c 10 -i 0.2 -w 15 "$t" 2>/dev/null | tail -2)
   echo "-- ping $t --"; echo "$R" | sed 's/^/  /'

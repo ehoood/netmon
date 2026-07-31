@@ -16,3 +16,6 @@ telegram-bot.js
 
 # git bundles used to seed machines that cannot reach the remote
 *.bundle
+
+# diagnose.sh writes its report next to itself
+diag_*.txt
