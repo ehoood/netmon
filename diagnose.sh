@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 #
-# diagnose.sh - One-shot internet diagnosis for a shared/kibbutz fiber line.
+# diagnose.sh - One-shot internet diagnosis: where does a speed problem sit?
 #
-# Collects everything needed to decide WHERE a speed problem sits:
-#   * local NIC link speed + errors  (is the Pi / cabling healthy?)
-#   * download vs upload asymmetry   (a download-only cap = upstream shaping)
-#   * path / internal hops (mtr)      (is the exchange the limiting hop?)
-#   * multi-server speed tests        (is it one server or the whole link?)
-#   * latency / jitter / loss / CPU
-# Then prints a plain-language verdict and saves a shareable report file.
+# Collects the evidence needed to place a bottleneck:
+#   * local NIC link speed + error counters (is the machine / cabling healthy?)
+#   * speed across SEVERAL servers          (your line, or one slow server?)
+#   * download vs upload asymmetry          (one-directional cap = shaping)
+#   * path and private hops (mtr)           (is local distribution gear the limit?)
+#   * latency / jitter / loss / DNS
+# Then prints a verdict COMPUTED FROM THE NUMBERS and saves a shareable report.
 #
-# Run on the Pi:   chmod +x diagnose.sh && ./diagnose.sh
-# (some checks are better with sudo:  sudo ./diagnose.sh )
+# The multi-server test is the point. A speedtest against one auto-selected
+# server measures that server as much as it measures your line, and the nearest
+# server is not always a good one - a single slow server can look exactly like
+# a capped connection until you test a second one.
+#
+# Run:   chmod +x diagnose.sh && ./diagnose.sh
+# Link speed and error counters need root:  sudo ./diagnose.sh
 #
 set -uo pipefail
 
@@ -64,7 +69,7 @@ echo "-- ip -s link (rx/tx errors & drops) --"
 ip -s link show "${IFACE:-}" 2>/dev/null | sed 's/^/  /' || true
 
 # --------------------------------------------------------------- 2. path
-sec "2. PATH TO THE INTERNET (internal hops = kibbutz gear)"
+sec "2. PATH TO THE INTERNET (private hops = gear between you and the ISP)"
 PATHTOOL=""
 command -v mtr >/dev/null 2>&1 && PATHTOOL=mtr
 [ -z "$PATHTOOL" ] && command -v traceroute >/dev/null 2>&1 && PATHTOOL=traceroute
@@ -79,7 +84,8 @@ for t in "${TARGETS[@]}"; do
     break
   fi
 done
-# Count private (RFC1918) hops = internal kibbutz distribution before the internet
+# Count private (RFC1918) hops: distribution gear you traverse before the internet.
+# More than one or two means a shared/managed network sits between you and the ISP.
 if [ -n "$PATHTOOL" ]; then
   PRIV=$([ "$PATHTOOL" = mtr ] && mtr -r -c1 "${TARGETS[0]}" 2>/dev/null || traceroute -q1 -w1 "${TARGETS[0]}" 2>/dev/null)
   N=$(echo "$PRIV" | grep -oE '(10\.[0-9]+|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9.]*' | sort -u | wc -l)
@@ -106,9 +112,13 @@ fi
 # Parser written to a temp file so the piped JSON stays on stdin (a here-doc
 # on `python3 -` would steal stdin from the pipe).
 PARSER="$(mktemp /tmp/netmon_parse.XXXXXX.py)"
-trap 'rm -f "$PARSER"' EXIT
+# Every parsed run appends one row here; section 6 reads it to reach a verdict
+# from the measurements instead of guessing.
+RESULTS="$(mktemp /tmp/netmon_results.XXXXXX)"
+export RESULTS
+trap 'rm -f "$PARSER" "$RESULTS"' EXIT
 cat > "$PARSER" <<'PY'
-import sys, json
+import os, sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -124,13 +134,20 @@ srv = d.get("server",{})
 print("  server : %s (%s) id=%s" % (srv.get("name"), srv.get("location"), srv.get("id")))
 print("  DOWN   : %6.1f Mbps" % dl)
 print("  UP     : %6.1f Mbps" % ul)
-print("  ratio  : UP/DOWN = %.2f  %s" % (ul/dl if dl else 0,
-      "<-- upload much higher: download is capped/shaped UPSTREAM" if dl and ul/dl>=1.25 else ""))
+print("  ratio  : UP/DOWN = %.2f" % (ul/dl if dl else 0))
 print("  ping   : %.1f ms  jitter %.1f ms  loss %s%%" % (
       idle or 0, p.get("jitter") or 0, d.get("packetLoss","?")))
 print("  bufferbloat: %s ms" % ("%.0f"%bb if bb is not None else "?"))
 u = (d.get("result",{}) or {}).get("url")
 if u: print("  result : %s" % u)
+
+# Hand the numbers to the verdict. No interpretation here - a single server is
+# never enough to conclude anything.
+res = os.environ.get("RESULTS")
+if res:
+    with open(res, "a") as f:
+        f.write("%.1f\t%.1f\t%s\t%s (%s)\n" % (
+            dl, ul, srv.get("id"), srv.get("name"), srv.get("location")))
 PY
 
 run_ookla() {  # $1 = optional --server-id
@@ -141,9 +158,21 @@ run_ookla() {  # $1 = optional --server-id
 if [ "$SPEEDBIN" = ookla ]; then
   echo "-- default (auto-selected) server --"
   run_ookla ""
-  echo "-- trying up to 3 alternate servers (is 600 consistent, or one bad server?) --"
-  IDS=$(speedtest -L --format=json 2>/dev/null | python3 -c 'import sys,json;print(" ".join(str(s["id"]) for s in json.load(sys.stdin).get("servers",[])[:3]))' 2>/dev/null)
+  # The comparison that makes the whole report meaningful: is a low result your
+  # line, or that one server? Skip whichever server the default run already used.
+  echo "-- up to 4 alternate servers (is a low result your line, or one server?) --"
+  DONE_ID="$(cut -f3 "$RESULTS" 2>/dev/null | tr '\n' ' ')"
+  export DONE_ID
+  IDS=$(speedtest -L --format=json 2>/dev/null | python3 -c '
+import sys, json, os
+done = set(os.environ.get("DONE_ID", "").split())
+ids = [str(s["id"]) for s in json.load(sys.stdin).get("servers", [])]
+print(" ".join(i for i in ids if i not in done))
+' 2>/dev/null)
+  N=0
   for id in $IDS; do
+    [ "$N" -ge 4 ] && break
+    N=$((N + 1))
     echo "  [server-id $id]"
     run_ookla "--server-id=$id"
   done
@@ -167,20 +196,140 @@ done
 
 # --------------------------------------------------------------- 6. verdict
 sec "6. VERDICT"
-echo "Read together with the numbers above:"
+
+# Everything below is derived from the rows collected in section 4, plus the
+# link speed from section 1 and the plan from netmon.conf when it exists.
+# Nothing is asserted that the measurements do not support.
+LINK_SPEED="${SPEED:-}" ; export LINK_SPEED
+PLAN_DOWN="$(sed -n 's/^PLAN_DOWN_MBPS=//p' "$DIR/netmon.conf" 2>/dev/null | head -1)"
+PLAN_UP="$(sed -n 's/^PLAN_UP_MBPS=//p' "$DIR/netmon.conf" 2>/dev/null | head -1)"
+export PLAN_DOWN PLAN_UP
+
+python3 - "$RESULTS" <<'PY'
+import os, sys
+
+def num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+rows = []
+try:
+    for line in open(sys.argv[1]):
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 4:
+            rows.append((float(f[0]), float(f[1]), f[2], f[3]))
+except OSError:
+    pass
+
+if not rows:
+    print("No speed results to reason about - install a speedtest tool and re-run.")
+    raise SystemExit
+
+link = num(os.environ.get("LINK_SPEED"))
+plan_d, plan_u = num(os.environ.get("PLAN_DOWN")), num(os.environ.get("PLAN_UP"))
+
+auto = rows[0]                        # the server speedtest picked on its own
+best_d = max(rows, key=lambda r: r[0])
+best_u = max(rows, key=lambda r: r[1])
+worst_d = min(rows, key=lambda r: r[0])
+
+print("Tested %d server(s). Best download %.0f Mbps (%s), worst %.0f Mbps (%s)."
+      % (len(rows), best_d[0], best_d[3], worst_d[0], worst_d[3]))
+print("Best upload %.0f Mbps (%s)." % (best_u[1], best_u[3]))
+print()
+
+findings = []
+# A link running at its negotiated ceiling makes every "shortfall" downstream of
+# it meaningless - the plan and the ISP cannot be judged through a saturated NIC.
+link_capped = bool(link and best_d[0] > link * 0.9)
+
+# 1. Server spread. This dominates: a line cannot be capped below a rate it
+#    demonstrably reached, so one fast server disproves a shaping theory.
+if len(rows) == 1:
+    findings.append(
+        "Only ONE server was tested, which is not enough to conclude anything. A\n"
+        "  slow result here could be that server rather than your line. Re-run when\n"
+        "  more servers are reachable, or test one by hand:\n"
+        "  speedtest -L   then   speedtest --server-id=<id>")
+elif auto[0] and best_d[0] >= auto[0] * 1.25:
+    findings.append(
+        "The auto-selected server (%s, %.0f Mbps) is NOT representative of your\n"
+        "  line: another server reached %.0f Mbps, %.0f%% more. A rate limit applies\n"
+        "  to the link regardless of destination, so a result this much higher rules\n"
+        "  OUT a cap at the lower figure. The low number measures that server or the\n"
+        "  path to it - not your connection. Judge your line by the BEST server, and\n"
+        "  be careful reporting the low one as a fault."
+        % (auto[3], auto[0], best_d[0], (best_d[0] / auto[0] - 1) * 100))
+elif worst_d[0] and best_d[0] >= worst_d[0] * 1.25:
+    findings.append(
+        "Download varies %.0f%% between servers (%.0f - %.0f Mbps). Part of the\n"
+        "  shortfall is server/peering, not your link."
+        % ((best_d[0] / worst_d[0] - 1) * 100, worst_d[0], best_d[0]))
+else:
+    findings.append(
+        "Download is consistent across the servers tested (%.0f - %.0f Mbps), so\n"
+        "  this reflects your line rather than one slow server."
+        % (worst_d[0], best_d[0]))
+
+# 2. Physical link. A NIC negotiated below gigabit caps everything downstream.
+if link_capped:
+    findings.append(
+        "Your best result (%.0f Mbps) is at the ceiling of a %.0f Mb/s link. The NIC\n"
+        "  is the limit - the line may well be faster than anything measured here."
+        % (best_d[0], link))
+elif link and link < 1000:
+    findings.append(
+        "The interface negotiated %.0f Mb/s, not gigabit. Everything is capped by\n"
+        "  that. Suspect the cable or the switch port before blaming the ISP." % link)
+
+# 3. Plan comparison, only once the best server is known - and never as a
+#    complaint against the ISP while the local NIC is the thing saturating.
+if plan_d:
+    share = best_d[0] / plan_d * 100
+    if link_capped:
+        findings.append(
+            "Best download is %.0f%% of your %.0f Mbps plan, but the %.0f Mb/s link is\n"
+            "  the ceiling, so that figure measures this machine, not your ISP.%s"
+            % (share, plan_d, link,
+               "\n  Measuring the rest of the plan needs a faster interface."
+               if link >= 1000 else
+               "\n  Fix the link (cable, port, adapter) before judging the plan."))
+    elif share < 70:
+        findings.append(
+            "Best download is %.0f%% of your %.0f Mbps plan - a real shortfall on every\n"
+            "  server tested. This is worth raising with your provider; attach this\n"
+            "  report." % (share, plan_d))
+    else:
+        findings.append("Best download is %.0f%% of your %.0f Mbps plan."
+                        % (share, plan_d))
+if plan_u and not link_capped:
+    findings.append("Best upload is %.0f%% of your %.0f Mbps plan."
+                    % (best_u[1] / plan_u * 100, plan_u))
+
+# 4. Asymmetry, judged on the best server only. On the wrong server this test
+#    produces a confident and completely wrong "download is shaped" conclusion.
+if best_d[0] and best_u[1] / best_d[0] >= 1.25 and not link_capped:
+    findings.append(
+        "Upload exceeds download by %.2fx even on your best server. If that holds\n"
+        "  across servers it points to an asymmetric rate profile upstream rather\n"
+        "  than local hardware - a faulty cable degrades BOTH directions, since\n"
+        "  1000BASE-T uses every pair at once."
+        % (best_u[1] / best_d[0]))
+
+for f in findings:
+    print("* " + f)
+PY
+
 echo
-echo "* If UPLOAD reaches your full plan (~900) but DOWNLOAD is stuck (~600):"
-echo "    -> Your Pi, cables, Deco and router are all PROVEN healthy (they push"
-echo "       900 one way). A one-directional download cap is NOT hardware."
-echo "       It is DOWNLOAD SHAPING / an asymmetric rate profile UPSTREAM"
-echo "       (your ONT/modem profile at the exchange). -> take it to whoever"
-echo "       runs the fiber/exchange (the מרכזייה)."
-echo "* If link speed is not 1000Mb/s Full, or error counters are non-zero:"
-echo "    -> a LOCAL cable/port fault. Replace the cable, try another port."
-echo "* If a private-IP hop in section 2 shows high latency/loss:"
-echo "    -> the limiting point is internal kibbutz distribution gear."
-echo "* If DOWNLOAD varies a lot between servers:"
-echo "    -> partly a server/peering issue, not purely your link."
+echo "Also check by hand:"
+echo "* Non-zero error counters or a link below 1000Mb/s in section 1 -> local"
+echo "  cable or port fault. Swap the cable, try another port."
+echo "* A private-IP hop in section 2 with high latency or loss -> the limit is"
+echo "  distribution gear between you and your ISP, not the ISP itself."
+echo "* High bufferbloat (>100ms) with otherwise fine speeds -> the line is fast"
+echo "  but latency collapses under load; ask about SQM/QoS."
 echo
 echo "Full report saved to: $OUT"
-echo "Send that file (and a week of netmon_log.csv) for a deeper analysis."
+echo "Pair it with a week of netmon_log.csv for a view over time."

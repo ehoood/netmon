@@ -157,8 +157,7 @@ What to look for after a week:
 | `telegram_send.py` | Minimal Telegram API sender |
 | `i18n.py` | Every user-facing string, en + he |
 | `install.sh` | Interactive setup |
-| `diagnose.sh` | One-shot diagnosis: link speed & errors, up/down asymmetry, path hops, multi-server tests, verdict |
-| `DIAGNOSIS.md` | Worked example — diagnosing an asymmetric 600↓/900↑ line (upstream download shaping) with a message to send the provider |
+| `diagnose.sh` | One-shot diagnosis: link speed & errors, multi-server tests, path hops, computed verdict |
 | `AGENTS.md` | Orientation for AI coding agents working on this repo |
 
 Runtime files that stay local and are gitignored: `netmon.conf`,
@@ -170,12 +169,20 @@ Runtime files that stay local and are gitignored: `netmon.conf`,
 bottleneck: `ethtool eth0 | grep Speed`. A 100 Mb NIC caps every result at ~95
 Mbps. Use a gigabit machine or a USB3 gigabit adapter.
 
-**Want a one-shot diagnosis right now** — run `./diagnose.sh` (better with
-`sudo`). It checks link speed and error counters, the **upload-vs-download
-ratio** (a download-only shortfall with healthy upload means the cap is upstream,
-not your hardware), the internal hops on the path, and several speedtest servers,
-then prints a verdict and saves a shareable report. See `DIAGNOSIS.md` for a
-worked example.
+**Want a one-shot diagnosis right now** — run `sudo ./diagnose.sh` (root is
+needed for link speed and error counters). It checks the physical link, runs
+speed tests against **several servers**, traces the path, and prints a verdict
+computed from those numbers, plus a report file you can send on.
+
+**A result far below the plan is not automatically your line.** A speedtest
+picks one server for you, usually the nearest, and measures that server as much
+as it measures your connection — a single congested server looks exactly like a
+capped line. Before reporting a fault, test a second and third server: if one of
+them returns a much higher number, your line clearly reaches that speed, and no
+rate limit at the lower figure can exist. `diagnose.sh` does this comparison for
+you and says so explicitly. It is also why `netmon` records `server_name` in
+every CSV row — if one name dominates your log, your trend is partly a chart of
+that server's health.
 
 **Nothing is being measured** — `crontab -l` should show a netmon block. Check
 `netmon.cron.log`, and make sure the `PAUSED` file is not there (`/resume`).
