@@ -22,11 +22,12 @@ an instant Telegram message, rate-limited by ALERT_COOLDOWN_MIN.
 Which server it measures against matters more than anything else here. A
 speedtest against one auto-selected server measures that server, and the path
 to it, as much as it measures your line - and the nearest server is not
-reliably a good one. netmon therefore CALIBRATES: it tries several nearby
-servers once, keeps the fastest as SERVER_ID, and measures against that one
-from then on, re-checking every CALIBRATE_DAYS. The bias is one-directional -
-a congested server can only make a line look slower, never faster - so the
-fastest server observed is the honest estimate of what the line can do.
+reliably a good one. netmon therefore CALIBRATES: it shortlists candidates by
+latency, speed-tests them, and keeps as SERVER_ID the one that comes closest to
+the best download AND the best upload seen while still being near, re-checking
+every CALIBRATE_DAYS. The bias is one-directional - a congested server can only
+make a line look slower, never faster - so the best figures observed are the
+honest estimate of what the line can do.
 
 Usage:
     ./netmon.py                         # append one row to ./netmon_log.csv
@@ -44,8 +45,10 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 
 import netmon_config as cfgmod
@@ -67,6 +70,9 @@ FIELDS = [
     "bufferbloat_ms",      # max(loaded) - idle  -> the key congestion signal
     "ext_ping_avg_ms",     # independent baseline ping (e.g. 1.1.1.1)
     "ext_ping_loss_pct",
+    "ext_loaded_ping_ms",  # same target, measured WHILE the line is saturated
+    "ext_bufferbloat_ms",  # ext_loaded - ext_idle: bufferbloat of YOUR line,
+                           # independent of how far the speedtest server is
     "server_name",
     "isp",
     "tool",                # ookla | speedtest-cli
@@ -96,9 +102,14 @@ def run(cmd, timeout):
         return 1, "", "exec error: %s" % e
 
 
-def external_ping(host, count=10):
-    """Independent baseline latency/loss, ISP-agnostic. Best effort."""
-    rc, out, _ = run(["ping", "-c", str(count), "-i", "0.2", "-w", "20", host], timeout=40)
+def external_ping(host, count=10, interval=0.2, deadline=20):
+    """Independent baseline latency/loss, ISP-agnostic. Best effort.
+
+    interval/deadline are widened by the under-load probe, which has to keep
+    pinging for as long as the speed test runs rather than finishing in 2s.
+    """
+    rc, out, _ = run(["ping", "-c", str(count), "-i", str(interval),
+                      "-w", str(deadline), host], timeout=deadline + 20)
     if rc != 0 and not out:
         return None, None
     avg = None
@@ -144,10 +155,6 @@ def measure_ookla(binary, server_id=None):
         "dl_latency_ms": round(dl_lat, 2) if dl_lat is not None else "",
         "ul_latency_ms": round(ul_lat, 2) if ul_lat is not None else "",
         "bufferbloat_ms": bufferbloat,
-        # Deliberately no server id column: FIELDS defines the CSV header, which
-        # is written once at file creation, so growing it would make every new
-        # row wider than the header of an existing log. server_name identifies
-        # the server well enough for reading the log.
         "server_name": (data.get("server", {}) or {}).get("name", ""),
         "isp": data.get("isp", ""),
         "tool": "ookla",
@@ -178,7 +185,7 @@ def measure_speedtest_cli(binary):
 
 
 def list_servers(binary, limit):
-    """Nearby speedtest servers, nearest first. Ookla only; [] if unavailable."""
+    """Nearby speedtest servers, as (id, label, host:port). Ookla only."""
     rc, out, err = run([binary, "-L", "--format=json"], timeout=60)
     if rc != 0:
         return []
@@ -186,16 +193,63 @@ def list_servers(binary, limit):
         servers = json.loads(out).get("servers", [])
     except ValueError:
         return []
-    return [(str(s.get("id")), "%s (%s)" % (s.get("name"), s.get("location")))
+    return [(str(s.get("id")), "%s (%s)" % (s.get("name"), s.get("location")),
+             s.get("host") or "")
             for s in servers[:limit] if s.get("id") is not None]
 
 
-# How much throughput it is worth giving up to keep a short, local network path.
-# A server that is 15% slower but 100 ms closer is the better instrument: the
-# download figure barely moves, while ping and bufferbloat become meaningful
-# again. Measured over an intercontinental hop, bufferbloat describes that hop,
-# not your line.
-NEAR_ENOUGH = 0.85
+def tcp_latency(host_port, attempts=3, timeout=2.0):
+    """Round-trip time of a TCP connect, in ms. None if unreachable.
+
+    Used to shortlist candidates before spending ~1.6 GB on a full speed test
+    against each. It costs a few packets and needs no root, unlike ICMP.
+    """
+    if not host_port:
+        return None
+    host, _, port = host_port.partition(":")
+    try:
+        port = int(port or 8080)
+    except ValueError:
+        port = 8080
+    best = None
+    for _ in range(attempts):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        start = time.time()
+        try:
+            s.connect((host, port))
+            rtt = (time.time() - start) * 1000.0
+            best = rtt if best is None else min(best, rtt)
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            s.close()
+    return round(best, 2) if best is not None else None
+
+
+# A server scoring within this much of the best is "as good", and latency
+# breaks the tie. Buying a few percent of throughput with 100 ms of extra path
+# is a bad trade: the speed figure barely moves while ping and bufferbloat stop
+# describing your line at all.
+NEAR_ENOUGH = 0.95
+
+# How many servers to shortlist by latency for every one actually speed-tested.
+# The pre-screen costs a few TCP handshakes; a speed test costs ~1.6 GB, so it
+# is worth casting a wide net cheaply and spending the bandwidth only on the
+# candidates that could plausibly win.
+PRESCREEN_FACTOR = 4
+
+
+def score(down, up, best_down, best_up):
+    """Fidelity of one server as an instrument: its worst dimension.
+
+    Taking the worst of the two is deliberate. A server that delivers full
+    download but a third of the upload misrepresents the line just as badly as
+    the reverse - and averaging would let a strong download hide it.
+    """
+    d = down / best_down if best_down else 0
+    u = up / best_up if best_up else 0
+    return min(d, u)
 
 
 def calibrate(binary, count, verbose=True):
@@ -205,45 +259,84 @@ def calibrate(binary, count, verbose=True):
     your connection, and the nearest server is not reliably a good one. The
     error is one-directional: a congested server can only make the line look
     SLOWER, never faster, because no server can deliver more than the link
-    carries. So the fastest server observed bounds what the line can really do.
+    carries. So the best figure observed in each direction bounds what the line
+    can really do, and a server is judged by how close it comes to both.
 
-    Throughput alone is not enough to pick an instrument, though. netmon also
-    reports latency and bufferbloat, and those are only meaningful over a short
-    path. So: take the fastest server as the reference, then among the servers
-    that come within NEAR_ENOUGH of it, keep the one with the lowest latency.
+    Three things decide the winner, in order:
+      1. a wide list is shortlisted by TCP latency - cheap, and a short path is
+         required for bufferbloat to mean anything;
+      2. each survivor is speed-tested, and scored by its WORST direction
+         against the best seen, so a good download cannot hide a bad upload;
+      3. among servers within NEAR_ENOUGH of the top score, the closest wins.
 
-    Returns (best_id, best_name, results) where results is a list of
-    (id, name, download_mbps or None, ping_ms or None).
+    Returns (best_id, best_label, results) where results is a list of
+    (id, label, download or None, upload or None, ping or None).
     """
-    servers = list_servers(binary, count)
-    if not servers:
+    wide = list_servers(binary, max(count * PRESCREEN_FACTOR, count))
+    if not wide:
         return None, None, []
 
+    # Shortlist on latency before spending bandwidth. Servers that never answer
+    # the handshake go last rather than being dropped: the list may be short.
+    screened = [(sid, label, tcp_latency(host)) for sid, label, host in wide]
+    screened.sort(key=lambda s: (s[2] is None, s[2] if s[2] is not None else 0))
+    shortlist = screened[:count]
+    if verbose and len(wide) > len(shortlist):
+        print("  (shortlisted %d of %d servers by latency, then speed-tested them)\n"
+              % (len(shortlist), len(wide)))
+
     results = []
-    for sid, name in servers:
+    for sid, label, _rtt in shortlist:
         try:
             r = measure_ookla(binary, server_id=sid)
-            ping = r.get("ping_idle_ms")
-            results.append((sid, name, r["download_mbps"], ping if ping != "" else None))
         except Exception as e:                       # one bad server must not abort
-            results.append((sid, name, None, None))
+            results.append((sid, label, None, None, None))
             if verbose:
-                print("  %-34s failed: %s" % (name, str(e)[:80]), file=sys.stderr)
+                print("  %-36s failed: %s" % (label, str(e)[:70]), file=sys.stderr)
             continue
+        ping = r.get("ping_idle_ms")
+        results.append((sid, label, r["download_mbps"], r["upload_mbps"],
+                        ping if ping != "" else None))
         if verbose:
-            print("  %-34s %7.1f Mbps down   %6s ms" % (name, r["download_mbps"], ping))
+            print("  %-36s %6.0f down  %6.0f up  %6s ms"
+                  % (label, r["download_mbps"], r["upload_mbps"], ping))
 
-    ok = [r for r in results if r[2] is not None]
+    ok = [r for r in results if r[2] is not None and r[3] is not None]
     if not ok:
         return None, None, results
 
-    fastest = max(ok, key=lambda r: r[2])
-    close = [r for r in ok if r[2] >= fastest[2] * NEAR_ENOUGH and r[3] is not None]
-    best = min(close, key=lambda r: r[3]) if close else fastest
-    if verbose and best[0] != fastest[0]:
-        print("\n  %s is %.0f%% as fast as %s but %.0f ms closer - better instrument."
-              % (best[1], 100.0 * best[2] / fastest[2], fastest[1], fastest[3] - best[3]))
+    best_down = max(r[2] for r in ok)
+    best_up = max(r[3] for r in ok)
+    scored = [(r, score(r[2], r[3], best_down, best_up)) for r in ok]
+    top = max(s for _, s in scored)
+    close = [r for r, s in scored if s >= top * NEAR_ENOUGH and r[4] is not None]
+    best = min(close, key=lambda r: r[4]) if close else max(scored, key=lambda x: x[1])[0]
+
+    if verbose:
+        print("\n  Line reaches %.0f Mbps down / %.0f Mbps up across these servers."
+              % (best_down, best_up))
+        print("  Chose %s - %.0f%% down / %.0f%% up of that, at %s ms."
+              % (best[1], 100.0 * best[2] / best_down, 100.0 * best[3] / best_up, best[4]))
+        for line in far_warning(best):
+            print(line)
     return best[0], best[1], results
+
+
+# Beyond this, the round trip is dominated by distance rather than by the local
+# line, and bufferbloat - which is loaded latency minus idle latency - starts
+# describing the long haul instead of the user's connection.
+FAR_MS = 50
+
+
+def far_warning(best):
+    """Say so when the only decent instrument is a distant one. Never silent."""
+    if best[4] is None or best[4] < FAR_MS:
+        return []
+    return ["  NOTE: no nearby server represented this line well, so the chosen one",
+            "  is %.0f ms away. Download and upload stay valid, and so does" % best[4],
+            "  ext_bufferbloat_ms, which is probed against your own ping host rather",
+            "  than the speedtest server. Only ping_idle_ms and bufferbloat_ms - the",
+            "  server's own figures - will read high; ignore those two."]
 
 
 def maybe_calibrate(cfg, binary):
@@ -276,7 +369,7 @@ def maybe_calibrate(cfg, binary):
         return "calibration found no usable server; keeping the current setting"
     cfgmod.set_values(cfg, {"SERVER_ID": best_id})
     tried = ", ".join("%s=%s" % (n, "fail" if d is None else "%.0f" % d)
-                      for _, n, d, _p in results)
+                      for _, n, d, _u, _p in results)
     return "calibrated: measuring against %s (%s)" % (best_name, tried)
 
 
@@ -301,8 +394,38 @@ def pick_speedtest():
     return None, None
 
 
+def migrate_header(csv_path):
+    """Widen an existing log to the current FIELDS before appending to it.
+
+    The header is written once, when the file is created, so simply growing
+    FIELDS would produce rows wider than the header of every existing log - the
+    extra values land in DictReader's restkey and the new columns are silently
+    meaningless. Rewriting the file once, with the old values kept and the new
+    columns blank, is what makes adding a column safe.
+    """
+    try:
+        with open(csv_path, newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None or header == FIELDS:
+                return
+            old_rows = list(csv.DictReader(f, fieldnames=header))
+    except OSError:
+        return
+
+    tmp = csv_path + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for r in old_rows:
+            w.writerow({k: r.get(k, "") for k in FIELDS})
+    os.replace(tmp, csv_path)
+
+
 def append_row(csv_path, row):
     new_file = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    if not new_file:
+        migrate_header(csv_path)
     # Ensure every field exists so the CSV stays rectangular.
     full = {k: row.get(k, "") for k in FIELDS}
     with open(csv_path, "a", newline="") as f:
@@ -384,7 +507,7 @@ def main():
             return 1
         cfgmod.set_values(cfg, {"SERVER_ID": best_id})
         cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
-        spread = [d for _, _, d, _p in results if d is not None]
+        spread = [d for _, _, d, _u, _p in results if d is not None]
         print("\nMeasuring against %s (id %s) from now on." % (best_name, best_id))
         if len(spread) > 1 and min(spread) and max(spread) / min(spread) >= 1.25:
             print("Servers disagreed by %.0f%% (%.0f - %.0f Mbps) - which is exactly why\n"
@@ -422,6 +545,22 @@ def main():
         print(note)
     server_id = args.server_id or str(cfg.get("SERVER_ID", "")).strip() or None
 
+    # Bufferbloat done properly: saturate the line with the speedtest, and probe
+    # latency against the SAME fixed host used for the idle baseline. Ookla's own
+    # figure measures the round trip to whichever server it used, so a distant
+    # server inflates it - this one does not care where the load came from.
+    probe = {}
+
+    def probe_under_load():
+        time.sleep(4)                       # let the transfer ramp up first
+        avg, loss = external_ping(args.ping_host, count=50, interval=0.5, deadline=35)
+        probe["avg"], probe["loss"] = avg, loss
+
+    prober = None
+    if not args.no_ext_ping:
+        prober = threading.Thread(target=probe_under_load, daemon=True)
+        prober.start()
+
     try:
         result = (measure_ookla(path, server_id=server_id) if kind == "ookla"
                   else measure_speedtest_cli(path))
@@ -431,6 +570,15 @@ def main():
         row["error"] = str(e)[:300]
         row["tool"] = kind
 
+    if prober is not None:
+        prober.join(timeout=30)
+        loaded = probe.get("avg")
+        idle = row.get("ext_ping_avg_ms")
+        row["ext_loaded_ping_ms"] = "" if loaded is None else loaded
+        # Only meaningful if the probe actually overlapped a running transfer.
+        if loaded is not None and isinstance(idle, float):
+            row["ext_bufferbloat_ms"] = round(max(0.0, loaded - idle), 1)
+
     append_row(args.csv, row)
     if not args.no_alert:
         maybe_alert(cfg, row)
@@ -438,7 +586,10 @@ def main():
     if row["status"] == "ok":
         print("%s  down=%s Mbps  up=%s Mbps  ping=%s ms  bufferbloat=%s ms  loss=%s%%" % (
             row["timestamp_iso"], row.get("download_mbps"), row.get("upload_mbps"),
-            row.get("ping_idle_ms"), row.get("bufferbloat_ms"), row.get("packet_loss_pct"),
+            row.get("ext_ping_avg_ms") or row.get("ping_idle_ms"),
+            row.get("ext_bufferbloat_ms", "") if row.get("ext_bufferbloat_ms", "") != ""
+            else row.get("bufferbloat_ms"),
+            row.get("packet_loss_pct"),
         ))
         return 0
     else:

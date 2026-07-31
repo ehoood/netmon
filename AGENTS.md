@@ -20,14 +20,14 @@ An internet-quality monitor for a single always-on Linux box. A cron job runs
    row with `status=error` and the message. A failed measurement is data — it is
    how outages show up in the report. Never let an exception escape, and never
    let an optional feature (an alert, a Telegram send) break the measurement.
-3. **The CSV schema is effectively frozen.** `FIELDS` in `netmon.py` defines the
-   column order. Never reorder or rename. And do not assume appending a column is
-   free: `append_row` writes the header only when the file is new, so on every
-   existing log a longer `FIELDS` produces rows *wider than the header* — the
-   extra value lands in `DictReader`'s `restkey` (`None`) and the column is
-   silently meaningless. Adding a column means migrating existing logs first.
-   This is why the calibrated server id is not a column: `server_name` already
-   identifies the server, and the id lives in `netmon.conf`.
+3. **The CSV grows only at the end, and only through `migrate_header()`.**
+   `FIELDS` in `netmon.py` defines the column order. Never reorder or rename.
+   Appending is safe *because* `append_row` calls `migrate_header()` first: the
+   header is written once at file creation, so without that step a longer
+   `FIELDS` would produce rows wider than an existing log's header and the extra
+   values would vanish into `DictReader`'s `restkey`. The migration rewrites the
+   file once, keeping every old value and leaving new columns blank; it is
+   idempotent and tested against a real 107-row log.
 4. **`netmon.conf` is the single source of truth.** Not env vars, not CLI
    defaults, not constants in a module. CLI flags may override for one run.
 5. **Every user-facing string goes in `i18n.py`**, in both `en` and `he`. No

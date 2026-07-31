@@ -25,6 +25,14 @@ hourly data settles that argument.
 | Download / upload | What you actually get vs. what you pay for |
 | Idle latency + jitter | Baseline responsiveness |
 | **Bufferbloat** (latency under load) | Latency added *while the line is busy*. High bufferbloat is why video calls stutter while someone downloads — a speed number alone never shows it |
+
+Bufferbloat is measured twice. `bufferbloat_ms` is the speedtest's own figure,
+so it includes the distance to whichever server was used. `ext_bufferbloat_ms`
+is netmon's: it pings your `PING_HOST` *while the speed test saturates the
+line*, and subtracts the idle baseline to the same host. Loading the link from
+one place and probing latency from another is how bufferbloat is properly
+tested — and it means the number stays honest no matter which server the speed
+test picked. Prefer `ext_bufferbloat_ms`.
 | Packet loss | Sign of a saturated or faulty line |
 | Independent baseline ping | Sanity check that does not depend on the speedtest server |
 | Hour of day | Lets the report compare evening peak against quiet night hours |
@@ -142,13 +150,17 @@ than it is, never faster, because no server can deliver more than the link
 carries. So the fastest server observed is the closest thing to the truth about
 what your connection can do.
 
-Speed alone is not enough to choose an instrument, though. netmon also reports
-latency and bufferbloat, and those only mean something over a short path —
-measured across an intercontinental hop, bufferbloat describes that hop, not
-your line. So calibration takes the fastest server as the reference and then,
-among the servers within 15% of it, keeps the one with the lowest latency. A
-server 15% slower but 100 ms closer is the better instrument: the download
-figure barely moves while latency becomes meaningful again.
+Speed alone is not enough to choose an instrument, though, and one number is
+not either. A server that delivers your full download but a third of your
+upload misrepresents the line just as badly as the reverse. So each candidate
+is scored by its **worst** direction against the best figure seen — averaging
+would let a strong download hide a weak upload — and among servers that score
+within 5% of the top, the closest one wins.
+
+Candidates are shortlisted by a TCP handshake before any of them is
+speed-tested. A handshake costs a few packets; a speed test costs ~1.6 GB. That
+makes it affordable to consider a wide list and spend bandwidth only on servers
+that could plausibly win.
 
 netmon therefore tries `CALIBRATE_SERVERS` nearby servers at install time, picks
 on that basis, and measures against the winner from then on — so the trend
