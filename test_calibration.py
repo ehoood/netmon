@@ -19,10 +19,11 @@ netmon.list_servers = lambda binary, limit: [
     (sid, v[0], "%s.example:8080" % sid) for sid, v in list(WORLD.items())[:limit]]
 netmon.tcp_latency = lambda host_port, **kw: WORLD[host_port.split(".")[0]][3]
 
+ERROR_TEXT = "server unreachable"
 def fake_measure(binary, server_id=None):
     calls.append(server_id)
     if server_id in FAILING:
-        raise RuntimeError("server unreachable")
+        raise RuntimeError(ERROR_TEXT)
     label, d, u, p = WORLD[server_id]
     return {"download_mbps": d, "upload_mbps": u, "ping_idle_ms": p}
 netmon.measure_ookla = fake_measure
@@ -154,9 +155,36 @@ state_age(9)
 cfg = fresh_cfg(SERVER_ID="keepme", CALIBRATE_DAYS="7")
 note = netmon.maybe_calibrate(cfg, "speedtest")
 check("total failure keeps the old server", cfg["SERVER_ID"], "keepme")
-check("  says so instead of raising", "no usable server" in note, True)
-check("  records the attempt (no retry storm)",
-      abs(float(cfgmod.read_state()["LAST_CALIBRATION_EPOCH"]) - time.time()) < 5, True)
+check("  says so instead of raising", "no server produced a usable result" in note, True)
+check("  records the FAILURE, not a success",
+      abs(float(cfgmod.read_state()["LAST_CALIBRATION_FAIL_EPOCH"]) - time.time()) < 5, True)
+
+# 14. A rate limit is transient: it must not freeze the server choice for the
+#     whole CALIBRATE_DAYS window the way a real "no usable server" would.
+import netmon as _n
+world(*FIELD)
+FAILING.update(WORLD)
+ERROR_TEXT = "[error] Limit reached:\n\nSpeedtest CLI. Too many requests"
+cfgmod.write_state({"LAST_CALIBRATION_EPOCH": 0, "LAST_CALIBRATION_FAIL_EPOCH": 0})
+cfg = fresh_cfg(SERVER_ID="keepme", CALIBRATE_DAYS="7")
+note = _n.maybe_calibrate(cfg, "speedtest")
+check("rate limiting is named, not guessed", "rate-limiting" in note, True)
+check("  retry is hours away, not days", "retrying in 6h" in note, True)
+check("  success timestamp untouched",
+      float(cfgmod.read_state().get("LAST_CALIBRATION_EPOCH", 0)), 0.0)
+
+# 15. ... and the backoff actually suppresses the next attempt.
+del calls[:]
+check("backoff suppresses the immediate retry", _n.maybe_calibrate(cfg, "speedtest"), "")
+check("  no bandwidth spent during backoff", calls, [])
+
+# 16. Once the backoff expires it tries again.
+cfgmod.write_state({"LAST_CALIBRATION_FAIL_EPOCH": int(time.time() - 7 * 3600)})
+FAILING.clear()
+note = _n.maybe_calibrate(cfg, "speedtest")
+check("retries after the backoff expires", cfg["SERVER_ID"], "pro0101")
+check("  and clears the failure marker",
+      float(cfgmod.read_state().get("LAST_CALIBRATION_FAIL_EPOCH", -1)), 0.0)
 
 print("\n%s" % ("ALL PASS" if not FAILS else "FAILURES: %s" % FAILS))
 sys.exit(1 if FAILS else 0)

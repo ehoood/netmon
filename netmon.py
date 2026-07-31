@@ -240,6 +240,18 @@ NEAR_ENOUGH = 0.95
 PRESCREEN_FACTOR = 4
 
 
+def rate_limited(results):
+    """Name the failure when a provider is throttling us rather than broken.
+
+    Worth distinguishing: "too many requests" clears by itself, so the right
+    response is to wait, not to change anything about the configuration.
+    """
+    blob = " ".join((r[5] or "") for r in results).lower()
+    if "limit reached" in blob or "too many requests" in blob:
+        return "the speedtest provider is rate-limiting this machine"
+    return ""
+
+
 def score(down, up, best_down, best_up):
     """Fidelity of one server as an instrument: its worst dimension.
 
@@ -290,13 +302,13 @@ def calibrate(binary, count, verbose=True):
         try:
             r = measure_ookla(binary, server_id=sid)
         except Exception as e:                       # one bad server must not abort
-            results.append((sid, label, None, None, None))
+            results.append((sid, label, None, None, None, str(e)))
             if verbose:
-                print("  %-36s failed: %s" % (label, str(e)[:70]), file=sys.stderr)
+                print("  %-36s failed: %s" % (label, str(e).strip()[:70]), file=sys.stderr)
             continue
         ping = r.get("ping_idle_ms")
         results.append((sid, label, r["download_mbps"], r["upload_mbps"],
-                        ping if ping != "" else None))
+                        ping if ping != "" else None, None))
         if verbose:
             print("  %-36s %6.0f down  %6.0f up  %6s ms"
                   % (label, r["download_mbps"], r["upload_mbps"], ping))
@@ -339,6 +351,19 @@ def far_warning(best):
             "  server's own figures - will read high; ignore those two."]
 
 
+# After a failed sweep, wait this long before trying again. Long enough not to
+# hammer a provider that is rate-limiting us, short enough that a transient
+# failure does not suppress calibration for the whole CALIBRATE_DAYS period.
+RETRY_AFTER_FAILURE_H = 6
+
+
+def _state_epoch(key):
+    try:
+        return float(cfgmod.read_state().get(key, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def maybe_calibrate(cfg, binary):
     """Calibrate on first use and every CALIBRATE_DAYS after. Best effort.
 
@@ -349,27 +374,33 @@ def maybe_calibrate(cfg, binary):
     if not days:
         return ""
     server = str(cfg.get("SERVER_ID", "")).strip()
-    try:
-        last = float(cfgmod.read_state().get("LAST_CALIBRATION_EPOCH", 0))
-    except (TypeError, ValueError):
-        last = 0
-    age_days = (time.time() - last) / 86400.0
-    if server and age_days < days:
+    now = time.time()
+    if server and (now - _state_epoch("LAST_CALIBRATION_EPOCH")) / 86400.0 < days:
+        return ""
+    # A failed sweep is not a successful one. Backing off for hours rather than
+    # for CALIBRATE_DAYS is what stops a transient outage - or a speedtest
+    # provider's rate limit - from freezing the choice of server for a week.
+    if (now - _state_epoch("LAST_CALIBRATION_FAIL_EPOCH")) < RETRY_AFTER_FAILURE_H * 3600:
         return ""
 
     count = cfgmod.get_int(cfg, "CALIBRATE_SERVERS")
     try:
         best_id, best_name, results = calibrate(binary, count, verbose=False)
     except Exception as e:
+        cfgmod.write_state({"LAST_CALIBRATION_FAIL_EPOCH": int(now)})
         return "calibration failed: %s" % str(e)[:120]
-    # Record the attempt either way, so a provider with one reachable server
-    # does not retry the whole sweep on every single run.
-    cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
+
     if not best_id:
-        return "calibration found no usable server; keeping the current setting"
+        cfgmod.write_state({"LAST_CALIBRATION_FAIL_EPOCH": int(now)})
+        why = rate_limited(results) or "no server produced a usable result"
+        return ("calibration failed (%s); keeping the current server, retrying in %dh"
+                % (why, RETRY_AFTER_FAILURE_H))
+
+    cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(now),
+                        "LAST_CALIBRATION_FAIL_EPOCH": 0})
     cfgmod.set_values(cfg, {"SERVER_ID": best_id})
     tried = ", ".join("%s=%s" % (n, "fail" if d is None else "%.0f" % d)
-                      for _, n, d, _u, _p in results)
+                      for _, n, d, _u, _p, _e in results)
     return "calibrated: measuring against %s (%s)" % (best_name, tried)
 
 
@@ -507,7 +538,7 @@ def main():
             return 1
         cfgmod.set_values(cfg, {"SERVER_ID": best_id})
         cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
-        spread = [d for _, _, d, _u, _p in results if d is not None]
+        spread = [d for _, _, d, _u, _p, _e in results if d is not None]
         print("\nMeasuring against %s (id %s) from now on." % (best_name, best_id))
         if len(spread) > 1 and min(spread) and max(spread) / min(spread) >= 1.25:
             print("Servers disagreed by %.0f%% (%.0f - %.0f Mbps) - which is exactly why\n"
