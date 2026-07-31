@@ -206,7 +206,7 @@ PLAN_UP="$(sed -n 's/^PLAN_UP_MBPS=//p' "$DIR/netmon.conf" 2>/dev/null | head -1
 export PLAN_DOWN PLAN_UP
 
 python3 - "$RESULTS" <<'PY'
-import os, sys
+import os, sys, textwrap
 
 def num(x):
     try:
@@ -235,9 +235,11 @@ best_d = max(rows, key=lambda r: r[0])
 best_u = max(rows, key=lambda r: r[1])
 worst_d = min(rows, key=lambda r: r[0])
 
-print("Tested %d server(s). Best download %.0f Mbps (%s), worst %.0f Mbps (%s)."
-      % (len(rows), best_d[0], best_d[3], worst_d[0], worst_d[3]))
-print("Best upload %.0f Mbps (%s)." % (best_u[1], best_u[3]))
+print(textwrap.fill(
+    "Tested %d server(s). Best download %.0f Mbps (%s), worst %.0f Mbps (%s). "
+    "Best upload %.0f Mbps (%s)."
+    % (len(rows), best_d[0], best_d[3], worst_d[0], worst_d[3],
+       best_u[1], best_u[3]), width=76))
 print()
 
 findings = []
@@ -249,40 +251,40 @@ link_capped = bool(link and best_d[0] > link * 0.9)
 #    demonstrably reached, so one fast server disproves a shaping theory.
 if len(rows) == 1:
     findings.append(
-        "Only ONE server was tested, which is not enough to conclude anything. A\n"
-        "  slow result here could be that server rather than your line. Re-run when\n"
-        "  more servers are reachable, or test one by hand:\n"
-        "  speedtest -L   then   speedtest --server-id=<id>")
+        "Only ONE server was tested, which is not enough to conclude anything. A "
+        "slow result here could be that server rather than your line. Re-run when "
+        "more servers are reachable, or test one by hand:\n"
+        "speedtest -L   then   speedtest --server-id=<id>")
 elif auto[0] and best_d[0] >= auto[0] * 1.25:
     findings.append(
-        "The auto-selected server (%s, %.0f Mbps) is NOT representative of your\n"
-        "  line: another server reached %.0f Mbps, %.0f%% more. A rate limit applies\n"
-        "  to the link regardless of destination, so a result this much higher rules\n"
-        "  OUT a cap at the lower figure. The low number measures that server or the\n"
-        "  path to it - not your connection. Judge your line by the BEST server, and\n"
-        "  be careful reporting the low one as a fault."
+        "The auto-selected server (%s, %.0f Mbps) is NOT representative of your "
+        "line: another server reached %.0f Mbps, %.0f%% more. A rate limit applies "
+        "to the link regardless of destination, so a result this much higher rules "
+        "OUT a cap at the lower figure. The low number measures that server or the "
+        "path to it - not your connection. Judge your line by the BEST server, and "
+        "be careful reporting the low one as a fault."
         % (auto[3], auto[0], best_d[0], (best_d[0] / auto[0] - 1) * 100))
 elif worst_d[0] and best_d[0] >= worst_d[0] * 1.25:
     findings.append(
-        "Download varies %.0f%% between servers (%.0f - %.0f Mbps). Part of the\n"
-        "  shortfall is server/peering, not your link."
+        "Download varies %.0f%% between servers (%.0f - %.0f Mbps). Part of the "
+        "shortfall is server/peering, not your link."
         % ((best_d[0] / worst_d[0] - 1) * 100, worst_d[0], best_d[0]))
 else:
     findings.append(
-        "Download is consistent across the servers tested (%.0f - %.0f Mbps), so\n"
-        "  this reflects your line rather than one slow server."
+        "Download is consistent across the servers tested (%.0f - %.0f Mbps), so "
+        "this reflects your line rather than one slow server."
         % (worst_d[0], best_d[0]))
 
 # 2. Physical link. A NIC negotiated below gigabit caps everything downstream.
 if link_capped:
     findings.append(
-        "Your best result (%.0f Mbps) is at the ceiling of a %.0f Mb/s link. The NIC\n"
-        "  is the limit - the line may well be faster than anything measured here."
+        "Your best result (%.0f Mbps) is at the ceiling of a %.0f Mb/s link. The "
+        "NIC is the limit - the line may well be faster than anything measured here."
         % (best_d[0], link))
 elif link and link < 1000:
     findings.append(
-        "The interface negotiated %.0f Mb/s, not gigabit. Everything is capped by\n"
-        "  that. Suspect the cable or the switch port before blaming the ISP." % link)
+        "The interface negotiated %.0f Mb/s, not gigabit. Everything is capped by "
+        "that. Suspect the cable or the switch port before blaming the ISP." % link)
 
 # 3. Plan comparison, only once the best server is known - and never as a
 #    complaint against the ISP while the local NIC is the thing saturating.
@@ -290,17 +292,17 @@ if plan_d:
     share = best_d[0] / plan_d * 100
     if link_capped:
         findings.append(
-            "Best download is %.0f%% of your %.0f Mbps plan, but the %.0f Mb/s link is\n"
-            "  the ceiling, so that figure measures this machine, not your ISP.%s"
+            "Best download is %.0f%% of your %.0f Mbps plan, but the %.0f Mb/s link "
+            "is the ceiling, so that figure measures this machine, not your ISP. %s"
             % (share, plan_d, link,
-               "\n  Measuring the rest of the plan needs a faster interface."
+               "Measuring the rest of the plan needs a faster interface."
                if link >= 1000 else
-               "\n  Fix the link (cable, port, adapter) before judging the plan."))
+               "Fix the link (cable, port, adapter) before judging the plan."))
     elif share < 70:
         findings.append(
-            "Best download is %.0f%% of your %.0f Mbps plan - a real shortfall on every\n"
-            "  server tested. This is worth raising with your provider; attach this\n"
-            "  report." % (share, plan_d))
+            "Best download is %.0f%% of your %.0f Mbps plan - a real shortfall on "
+            "every server tested. This is worth raising with your provider; attach "
+            "this report." % (share, plan_d))
     else:
         findings.append("Best download is %.0f%% of your %.0f Mbps plan."
                         % (share, plan_d))
@@ -312,14 +314,20 @@ if plan_u and not link_capped:
 #    produces a confident and completely wrong "download is shaped" conclusion.
 if best_d[0] and best_u[1] / best_d[0] >= 1.25 and not link_capped:
     findings.append(
-        "Upload exceeds download by %.2fx even on your best server. If that holds\n"
-        "  across servers it points to an asymmetric rate profile upstream rather\n"
-        "  than local hardware - a faulty cable degrades BOTH directions, since\n"
-        "  1000BASE-T uses every pair at once."
+        "Upload exceeds download by %.2fx even on your best server. If that holds "
+        "across servers it points to an asymmetric rate profile upstream rather "
+        "than local hardware - a faulty cable degrades BOTH directions, since "
+        "1000BASE-T uses every pair at once."
         % (best_u[1] / best_d[0]))
 
+# Wrap at print time. Findings are written as flowing text so that an injected
+# server name cannot overrun the line; an explicit \n marks a line that must
+# stay verbatim (command examples).
 for f in findings:
-    print("* " + f)
+    for i, para in enumerate(f.split("\n")):
+        print(textwrap.fill(para, width=76,
+                            initial_indent="* " if i == 0 else "    ",
+                            subsequent_indent="  "))
 PY
 
 echo
