@@ -134,6 +134,10 @@ STRINGS = {
                          "he": "📡 <b>מדידה</b>\n%s"},
     "bot_measure_fail": {"en": "❌ Measurement failed:\n%s",
                          "he": "❌ המדידה נכשלה:\n%s"},
+    "bot_paused_manual": {"en": ("⏸ Automatic monitoring is paused — running this one "
+                                 "anyway because you asked. /resume to restart the schedule."),
+                          "he": ("⏸ הניטור האוטומטי עצור — מריץ את המדידה הזו בכל זאת "
+                                 "כי ביקשת. /resume כדי להחזיר את התזמון.")},
     "bot_calibrating":  {"en": ("🎯 Testing %d nearby servers to find which one represents "
                                 "your line. This transfers a few GB and takes a few minutes."),
                          "he": ("🎯 בודק %d שרתים קרובים כדי למצוא מי מהם מייצג את הקו שלך. "

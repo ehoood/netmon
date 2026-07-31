@@ -125,6 +125,11 @@ def cmd_speed(cfg, token, chat, lang):
         reply(token, chat, t(lang, "bot_busy"))
         return
     try:
+        # PAUSED gates the cron line, not netmon.py, so a manual measurement
+        # deliberately still runs - but silently doing so looks like the pause
+        # was ignored or forgotten.
+        if cfgmod.is_paused():
+            reply(token, chat, t(lang, "bot_paused_manual"))
         reply(token, chat, t(lang, "bot_measuring"))
         p = subprocess.run([sys.executable, os.path.join(cfgmod.DIR, "netmon.py"), "--no-alert"],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
