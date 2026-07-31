@@ -112,7 +112,7 @@ gitignored.
 | `PING_HOST` | `1.1.1.1` | Independent baseline ping target |
 | `SERVER_ID` | — | Speedtest server to measure against; empty = auto-pick |
 | `CALIBRATE_DAYS` | `7` | Re-check which server represents your line every N days; `0` = never |
-| `CALIBRATE_SERVERS` | `4` | How many nearby servers to try when calibrating |
+| `CALIBRATE_SERVERS` | `6` | How many nearby servers to try when calibrating |
 | `BOT_TOKEN` / `CHAT_ID` | — | Telegram credentials |
 | `ALERTS_ENABLED` | `1` | Instant alert on a bad measurement |
 | `ALERT_THRESHOLD_PCT` | `50` | Alert below this % of plan |
@@ -142,12 +142,20 @@ than it is, never faster, because no server can deliver more than the link
 carries. So the fastest server observed is the closest thing to the truth about
 what your connection can do.
 
-netmon therefore tries `CALIBRATE_SERVERS` nearby servers at install time,
-keeps the fastest as `SERVER_ID`, and measures against that one from then on —
-so the trend compares like with like instead of drifting with whichever server
-was picked that hour. It re-checks every `CALIBRATE_DAYS`, because the best
-server changes over time. `/calibrate` forces it, `/setserver <id>` pins one by
-hand, and `/setserver auto` returns to auto-selection.
+Speed alone is not enough to choose an instrument, though. netmon also reports
+latency and bufferbloat, and those only mean something over a short path —
+measured across an intercontinental hop, bufferbloat describes that hop, not
+your line. So calibration takes the fastest server as the reference and then,
+among the servers within 15% of it, keeps the one with the lowest latency. A
+server 15% slower but 100 ms closer is the better instrument: the download
+figure barely moves while latency becomes meaningful again.
+
+netmon therefore tries `CALIBRATE_SERVERS` nearby servers at install time, picks
+on that basis, and measures against the winner from then on — so the trend
+compares like with like instead of drifting with whichever server was picked
+that hour. It re-checks every `CALIBRATE_DAYS`, because the best server changes
+over time. `/calibrate` forces it, `/setserver <id>` pins one by hand, and
+`/setserver auto` returns to auto-selection.
 
 This makes netmon measure **capability** — what your line can deliver, which is
 what a plan is sold on — rather than the health of one nearby server.

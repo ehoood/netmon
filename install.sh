@@ -303,12 +303,13 @@ fi
 # never has to know this is a problem.
 echo
 c_b "Finding which speedtest server represents your line"
-NSERV="$(conf_get CALIBRATE_SERVERS)"; NSERV="${NSERV:-4}"
+NSERV="$(conf_get CALIBRATE_SERVERS)"; NSERV="${NSERV:-6}"
 echo "  A speedtest measures the server and the path to it as much as it measures"
-echo "  your connection. Testing $NSERV nearby servers and keeping the fastest gives"
-echo "  an honest baseline - a slow server can only understate your line, never"
-echo "  overstate it."
-echo "  This transfers roughly $((NSERV * 2)) GB and takes a few minutes."
+echo "  your connection. Testing $NSERV nearby servers gives an honest baseline -"
+echo "  a slow server can only understate your line, never overstate it. netmon"
+echo "  keeps the fastest one that is also on a short path, so latency and"
+echo "  bufferbloat stay meaningful."
+echo "  This transfers roughly $((NSERV * 16 / 10)) GB and takes a few minutes."
 # On a re-run there is usually nothing to redo, so do not push the user into
 # spending the bandwidth again by leaving the default at yes.
 CAL_DEFAULT=y

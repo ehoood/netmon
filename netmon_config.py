@@ -51,7 +51,9 @@ SCHEMA = {
     "PING_HOST":            ("1.1.1.1", "Host for the independent baseline ping"),
     "SERVER_ID":            ("",        "Speedtest server to measure against; empty = let the tool auto-pick"),
     "CALIBRATE_DAYS":       ("7",       "Re-check which server best represents your line every N days; 0 = never"),
-    "CALIBRATE_SERVERS":    ("4",       "How many nearby servers to try when calibrating"),
+    # Six, not four: the servers that both perform well and sit on a short path
+    # are often past the nearest handful in the provider's list.
+    "CALIBRATE_SERVERS":    ("6",       "How many nearby servers to try when calibrating"),
     "BOT_TOKEN":            ("",        "Telegram bot token from @BotFather"),
     "CHAT_ID":              ("",        "Telegram chat id that may command the bot"),
     "ALERTS_ENABLED":       ("1",       "Send an instant Telegram alert on a bad measurement: 1 | 0"),

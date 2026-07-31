@@ -190,6 +190,14 @@ def list_servers(binary, limit):
             for s in servers[:limit] if s.get("id") is not None]
 
 
+# How much throughput it is worth giving up to keep a short, local network path.
+# A server that is 15% slower but 100 ms closer is the better instrument: the
+# download figure barely moves, while ping and bufferbloat become meaningful
+# again. Measured over an intercontinental hop, bufferbloat describes that hop,
+# not your line.
+NEAR_ENOUGH = 0.85
+
+
 def calibrate(binary, count, verbose=True):
     """Find which nearby server actually represents this line.
 
@@ -197,11 +205,15 @@ def calibrate(binary, count, verbose=True):
     your connection, and the nearest server is not reliably a good one. The
     error is one-directional: a congested server can only make the line look
     SLOWER, never faster, because no server can deliver more than the link
-    carries. So the fastest server observed is the closest estimate of what the
-    line can really do - and the one worth measuring against from then on.
+    carries. So the fastest server observed bounds what the line can really do.
+
+    Throughput alone is not enough to pick an instrument, though. netmon also
+    reports latency and bufferbloat, and those are only meaningful over a short
+    path. So: take the fastest server as the reference, then among the servers
+    that come within NEAR_ENOUGH of it, keep the one with the lowest latency.
 
     Returns (best_id, best_name, results) where results is a list of
-    (id, name, download_mbps or None).
+    (id, name, download_mbps or None, ping_ms or None).
     """
     servers = list_servers(binary, count)
     if not servers:
@@ -211,19 +223,26 @@ def calibrate(binary, count, verbose=True):
     for sid, name in servers:
         try:
             r = measure_ookla(binary, server_id=sid)
-            results.append((sid, name, r["download_mbps"]))
+            ping = r.get("ping_idle_ms")
+            results.append((sid, name, r["download_mbps"], ping if ping != "" else None))
         except Exception as e:                       # one bad server must not abort
-            results.append((sid, name, None))
+            results.append((sid, name, None, None))
             if verbose:
                 print("  %-34s failed: %s" % (name, str(e)[:80]), file=sys.stderr)
             continue
         if verbose:
-            print("  %-34s %7.1f Mbps down" % (name, r["download_mbps"]))
+            print("  %-34s %7.1f Mbps down   %6s ms" % (name, r["download_mbps"], ping))
 
     ok = [r for r in results if r[2] is not None]
     if not ok:
         return None, None, results
-    best = max(ok, key=lambda r: r[2])
+
+    fastest = max(ok, key=lambda r: r[2])
+    close = [r for r in ok if r[2] >= fastest[2] * NEAR_ENOUGH and r[3] is not None]
+    best = min(close, key=lambda r: r[3]) if close else fastest
+    if verbose and best[0] != fastest[0]:
+        print("\n  %s is %.0f%% as fast as %s but %.0f ms closer - better instrument."
+              % (best[1], 100.0 * best[2] / fastest[2], fastest[1], fastest[3] - best[3]))
     return best[0], best[1], results
 
 
@@ -257,7 +276,7 @@ def maybe_calibrate(cfg, binary):
         return "calibration found no usable server; keeping the current setting"
     cfgmod.set_values(cfg, {"SERVER_ID": best_id})
     tried = ", ".join("%s=%s" % (n, "fail" if d is None else "%.0f" % d)
-                      for _, n, d in results)
+                      for _, n, d, _p in results)
     return "calibrated: measuring against %s (%s)" % (best_name, tried)
 
 
@@ -365,7 +384,7 @@ def main():
             return 1
         cfgmod.set_values(cfg, {"SERVER_ID": best_id})
         cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
-        spread = [d for _, _, d in results if d is not None]
+        spread = [d for _, _, d, _p in results if d is not None]
         print("\nMeasuring against %s (id %s) from now on." % (best_name, best_id))
         if len(spread) > 1 and min(spread) and max(spread) / min(spread) >= 1.25:
             print("Servers disagreed by %.0f%% (%.0f - %.0f Mbps) - which is exactly why\n"
