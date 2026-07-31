@@ -296,7 +296,44 @@ if [ "$BOT_WAS_RUNNING" = 1 ]; then
   sudo systemctl start netmon-bot >/dev/null 2>&1 && echo "  restarted the netmon bot."
 fi
 
-# --- 7. First measurement ----------------------------------------------------
+# --- 7. Calibration ----------------------------------------------------------
+# Which server gets measured decides everything downstream. The nearest one is
+# not reliably a good one, and a congested server is indistinguishable from a
+# capped line until a second server is tried. Do it here, once, so the user
+# never has to know this is a problem.
+echo
+c_b "Finding which speedtest server represents your line"
+NSERV="$(conf_get CALIBRATE_SERVERS)"; NSERV="${NSERV:-4}"
+echo "  A speedtest measures the server and the path to it as much as it measures"
+echo "  your connection. Testing $NSERV nearby servers and keeping the fastest gives"
+echo "  an honest baseline - a slow server can only understate your line, never"
+echo "  overstate it."
+echo "  This transfers roughly $((NSERV * 2)) GB and takes a few minutes."
+# On a re-run there is usually nothing to redo, so do not push the user into
+# spending the bandwidth again by leaving the default at yes.
+CAL_DEFAULT=y
+if [ -n "$(conf_get SERVER_ID)" ]; then
+  echo "  Already calibrated to server id $(conf_get SERVER_ID); re-run only if your"
+  echo "  connection or provider changed."
+  CAL_DEFAULT=n
+fi
+DOCAL="$(ask "  Run it now? (y/n)" "$CAL_DEFAULT")"
+if [ "${DOCAL,,}" = "y" ]; then
+  "$DIR/netmon.py" --calibrate || c_wn "  Calibration did not complete - the tool will retry later."
+elif [ -z "$(conf_get SERVER_ID)" ]; then
+  # Never calibrated and declining now: the first scheduled run would otherwise
+  # spring the whole multi-server sweep on them unannounced. Turn the automatic
+  # re-check off and say how to get it back.
+  set_conf CALIBRATE_DAYS 0
+  c_wn "  Skipped. Automatic re-calibration is off; run '$DIR/netmon.py --calibrate'"
+  c_wn "  or send /calibrate to the bot whenever you want it."
+else
+  # Already calibrated - declining just means "not again right now". Leave the
+  # periodic re-check alone.
+  echo "  Keeping the current server."
+fi
+
+# --- 8. First measurement ----------------------------------------------------
 echo
 c_b "Running one measurement now (~40s)"
 "$DIR/netmon.py" --no-alert || c_wn "  The first measurement failed - see the message above."
@@ -310,7 +347,7 @@ echo "    HTML report:     $DIR/report.py"
 echo "    Send to Telegram:$DIR/report.py --telegram"
 echo "    Change settings: $DIR/netmon_config.py --show"
 if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
-echo "    From Telegram:   /help /speed /status /config /setinterval /setplan"
+echo "    From Telegram:   /help /speed /status /config /setinterval /setplan /calibrate"
 fi
 echo
 echo "  Let it collect data for about a week, then read the report. A line that is"

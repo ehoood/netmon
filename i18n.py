@@ -104,6 +104,8 @@ STRINGS = {
                                 "/setalert &lt;percent&gt;|off — instant alert below this %% of plan\n"
                                 "/setreport &lt;day&gt; &lt;hour&gt;|off — periodic report (day 0=Sun)\n"
                                 "/setping &lt;host&gt; — baseline ping target\n"
+                                "/calibrate — find which server represents your line\n"
+                                "/setserver &lt;id&gt;|auto — measure against a specific server\n"
                                 "/setlang en|he — language\n"
                                 "/help — this message"),
                          "he": ("📡 <b>netmon — ניטור איכות אינטרנט</b>\n\n"
@@ -122,6 +124,8 @@ STRINGS = {
                                 "/setalert &lt;אחוז&gt;|off — התראה מיידית מתחת לאחוז זה מהחבילה\n"
                                 "/setreport &lt;יום&gt; &lt;שעה&gt;|off — דוח תקופתי (יום 0=ראשון)\n"
                                 "/setping &lt;כתובת&gt; — יעד הפינג הבסיסי\n"
+                                "/calibrate — איתור השרת שמייצג את הקו שלך\n"
+                                "/setserver &lt;מזהה&gt;|auto — מדידה מול שרת מסוים\n"
                                 "/setlang en|he — שפה\n"
                                 "/help — ההודעה הזו")},
     "bot_measuring":    {"en": "⏳ Measuring… this takes about 40 seconds.",
@@ -130,6 +134,14 @@ STRINGS = {
                          "he": "📡 <b>מדידה</b>\n%s"},
     "bot_measure_fail": {"en": "❌ Measurement failed:\n%s",
                          "he": "❌ המדידה נכשלה:\n%s"},
+    "bot_calibrating":  {"en": ("🎯 Testing %d nearby servers to find which one represents "
+                                "your line. This transfers a few GB and takes a few minutes."),
+                         "he": ("🎯 בודק %d שרתים קרובים כדי למצוא מי מהם מייצג את הקו שלך. "
+                                "זה מעביר כמה ג׳יגה ולוקח כמה דקות.")},
+    "bot_calibrated":   {"en": "🎯 <b>Calibration</b>\n%s",
+                         "he": "🎯 <b>כיול</b>\n%s"},
+    "bot_calibrate_fail": {"en": "❌ Calibration failed:\n%s",
+                           "he": "❌ הכיול נכשל:\n%s"},
     "bot_building":     {"en": "📊 Building the report…", "he": "📊 בונה את הדוח…"},
     "bot_report_fail":  {"en": "❌ Report failed:\n%s",    "he": "❌ שגיאה בדוח:\n%s"},
     "bot_status":       {"en": ("📡 <b>Monitor status</b>\n\n"

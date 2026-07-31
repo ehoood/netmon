@@ -277,6 +277,40 @@ def cmd_setping(cfg, args, token, chat, lang):
     save(cfg, {"PING_HOST": cleaned}, lang, token, chat)
 
 
+def cmd_setserver(cfg, args, token, chat, lang):
+    if not args:
+        reply(token, chat, t(lang, "bot_usage", "/setserver &lt;id&gt; | auto")); return
+    ok, cleaned = cfgmod.validate("SERVER_ID", args[0])
+    if not ok:
+        reply(token, chat, t(lang, "bot_bad_value", "SERVER_ID", cleaned)); return
+    save(cfg, {"SERVER_ID": cleaned}, lang, token, chat)
+
+
+def cmd_calibrate(cfg, token, chat, lang):
+    """Try several servers and keep the fastest. Long-running, so it takes the lock."""
+    if not _busy.acquire(blocking=False):
+        reply(token, chat, t(lang, "bot_busy"))
+        return
+    try:
+        n = cfgmod.get_int(cfg, "CALIBRATE_SERVERS")
+        reply(token, chat, t(lang, "bot_calibrating", n))
+        p = subprocess.run([sys.executable, os.path.join(cfgmod.DIR, "netmon.py"), "--calibrate"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           timeout=180 * max(2, n))
+        out = (p.stdout or "").strip()
+        if p.returncode == 0 and out:
+            reply(token, chat, t(lang, "bot_calibrated", out))
+        else:
+            why = ((p.stderr or "") + "\n" + out).strip()[:600] or "unknown error"
+            reply(token, chat, t(lang, "bot_calibrate_fail", why))
+    except subprocess.TimeoutExpired:
+        reply(token, chat, t(lang, "bot_calibrate_fail", "timeout"))
+    except Exception as e:
+        reply(token, chat, t(lang, "bot_calibrate_fail", str(e)[:300]))
+    finally:
+        _busy.release()
+
+
 def cmd_setlang(cfg, args, token, chat, lang):
     if not args:
         reply(token, chat, t(lang, "bot_usage", "/setlang en | he")); return
@@ -331,6 +365,10 @@ def handle(text, token, chat):
         cmd_setreport(cfg, args, token, chat, lang)
     elif cmd == "/setping":
         cmd_setping(cfg, args, token, chat, lang)
+    elif cmd == "/setserver":
+        cmd_setserver(cfg, args, token, chat, lang)
+    elif cmd == "/calibrate":
+        threading.Thread(target=cmd_calibrate, args=(cfg, token, chat, lang), daemon=True).start()
     elif cmd == "/setlang":
         cmd_setlang(cfg, args, token, chat, lang)
     elif cmd.startswith("/"):

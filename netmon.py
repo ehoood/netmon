@@ -19,11 +19,22 @@ If ALERTS_ENABLED is on and Telegram credentials are configured, a measurement
 that falls below ALERT_THRESHOLD_PCT of your plan - or fails outright - sends
 an instant Telegram message, rate-limited by ALERT_COOLDOWN_MIN.
 
+Which server it measures against matters more than anything else here. A
+speedtest against one auto-selected server measures that server, and the path
+to it, as much as it measures your line - and the nearest server is not
+reliably a good one. netmon therefore CALIBRATES: it tries several nearby
+servers once, keeps the fastest as SERVER_ID, and measures against that one
+from then on, re-checking every CALIBRATE_DAYS. The bias is one-directional -
+a congested server can only make a line look slower, never faster - so the
+fastest server observed is the honest estimate of what the line can do.
+
 Usage:
     ./netmon.py                         # append one row to ./netmon_log.csv
     ./netmon.py --csv /path/log.csv     # custom log location
     ./netmon.py --ping-host 8.8.8.8     # external baseline ping target
     ./netmon.py --no-alert              # measure without alerting
+    ./netmon.py --calibrate             # re-pick the server that represents the line
+    ./netmon.py --server-id 12345       # one-off measurement against a given server
 """
 
 import argparse
@@ -101,9 +112,11 @@ def external_ping(host, count=10):
     return avg, loss
 
 
-def measure_ookla(binary):
+def measure_ookla(binary, server_id=None):
     """Run Ookla speedtest --format=json and normalise the fields we care about."""
     cmd = [binary, "--format=json", "--accept-license", "--accept-gdpr"]
+    if server_id:
+        cmd.append("--server-id=%s" % server_id)
     rc, out, err = run(cmd, timeout=180)
     if rc != 0:
         # Ookla sometimes prints a JSON error object; surface stderr otherwise.
@@ -131,6 +144,10 @@ def measure_ookla(binary):
         "dl_latency_ms": round(dl_lat, 2) if dl_lat is not None else "",
         "ul_latency_ms": round(ul_lat, 2) if ul_lat is not None else "",
         "bufferbloat_ms": bufferbloat,
+        # Deliberately no server id column: FIELDS defines the CSV header, which
+        # is written once at file creation, so growing it would make every new
+        # row wider than the header of an existing log. server_name identifies
+        # the server well enough for reading the log.
         "server_name": (data.get("server", {}) or {}).get("name", ""),
         "isp": data.get("isp", ""),
         "tool": "ookla",
@@ -158,6 +175,90 @@ def measure_speedtest_cli(binary):
         "tool": "speedtest-cli",
         "result_url": data.get("share", "") or "",
     }
+
+
+def list_servers(binary, limit):
+    """Nearby speedtest servers, nearest first. Ookla only; [] if unavailable."""
+    rc, out, err = run([binary, "-L", "--format=json"], timeout=60)
+    if rc != 0:
+        return []
+    try:
+        servers = json.loads(out).get("servers", [])
+    except ValueError:
+        return []
+    return [(str(s.get("id")), "%s (%s)" % (s.get("name"), s.get("location")))
+            for s in servers[:limit] if s.get("id") is not None]
+
+
+def calibrate(binary, count, verbose=True):
+    """Find which nearby server actually represents this line.
+
+    A speedtest measures the server and the path to it as much as it measures
+    your connection, and the nearest server is not reliably a good one. The
+    error is one-directional: a congested server can only make the line look
+    SLOWER, never faster, because no server can deliver more than the link
+    carries. So the fastest server observed is the closest estimate of what the
+    line can really do - and the one worth measuring against from then on.
+
+    Returns (best_id, best_name, results) where results is a list of
+    (id, name, download_mbps or None).
+    """
+    servers = list_servers(binary, count)
+    if not servers:
+        return None, None, []
+
+    results = []
+    for sid, name in servers:
+        try:
+            r = measure_ookla(binary, server_id=sid)
+            results.append((sid, name, r["download_mbps"]))
+        except Exception as e:                       # one bad server must not abort
+            results.append((sid, name, None))
+            if verbose:
+                print("  %-34s failed: %s" % (name, str(e)[:80]), file=sys.stderr)
+            continue
+        if verbose:
+            print("  %-34s %7.1f Mbps down" % (name, r["download_mbps"]))
+
+    ok = [r for r in results if r[2] is not None]
+    if not ok:
+        return None, None, results
+    best = max(ok, key=lambda r: r[2])
+    return best[0], best[1], results
+
+
+def maybe_calibrate(cfg, binary):
+    """Calibrate on first use and every CALIBRATE_DAYS after. Best effort.
+
+    Returns a note for the caller to print, or "". Never raises: a failed
+    calibration must not cost the scheduled measurement.
+    """
+    days = cfgmod.get_int(cfg, "CALIBRATE_DAYS")
+    if not days:
+        return ""
+    server = str(cfg.get("SERVER_ID", "")).strip()
+    try:
+        last = float(cfgmod.read_state().get("LAST_CALIBRATION_EPOCH", 0))
+    except (TypeError, ValueError):
+        last = 0
+    age_days = (time.time() - last) / 86400.0
+    if server and age_days < days:
+        return ""
+
+    count = cfgmod.get_int(cfg, "CALIBRATE_SERVERS")
+    try:
+        best_id, best_name, results = calibrate(binary, count, verbose=False)
+    except Exception as e:
+        return "calibration failed: %s" % str(e)[:120]
+    # Record the attempt either way, so a provider with one reachable server
+    # does not retry the whole sweep on every single run.
+    cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
+    if not best_id:
+        return "calibration found no usable server; keeping the current setting"
+    cfgmod.set_values(cfg, {"SERVER_ID": best_id})
+    tried = ", ".join("%s=%s" % (n, "fail" if d is None else "%.0f" % d)
+                      for _, n, d in results)
+    return "calibrated: measuring against %s (%s)" % (best_name, tried)
 
 
 def pick_speedtest():
@@ -243,7 +344,34 @@ def main():
                     help="external baseline ping target")
     ap.add_argument("--no-ext-ping", action="store_true", help="skip the external baseline ping")
     ap.add_argument("--no-alert", action="store_true", help="do not send a Telegram alert on a bad result")
+    ap.add_argument("--server-id", default=None,
+                    help="measure against this speedtest server (overrides SERVER_ID)")
+    ap.add_argument("--calibrate", nargs="?", const=0, type=int, metavar="N",
+                    help="test N nearby servers, keep the fastest as SERVER_ID, and exit")
     args = ap.parse_args()
+
+    if args.calibrate is not None:
+        kind, path = pick_speedtest()
+        if kind != "ookla":
+            print("calibration needs the Ookla speedtest CLI", file=sys.stderr)
+            return 2
+        count = args.calibrate or cfgmod.get_int(cfg, "CALIBRATE_SERVERS")
+        print("Testing %d nearby servers - this transfers a few GB and takes a few minutes."
+              % count)
+        best_id, best_name, results = calibrate(path, count)
+        if not best_id:
+            print("No server produced a usable result; SERVER_ID left unchanged.",
+                  file=sys.stderr)
+            return 1
+        cfgmod.set_values(cfg, {"SERVER_ID": best_id})
+        cfgmod.write_state({"LAST_CALIBRATION_EPOCH": int(time.time())})
+        spread = [d for _, _, d in results if d is not None]
+        print("\nMeasuring against %s (id %s) from now on." % (best_name, best_id))
+        if len(spread) > 1 and min(spread) and max(spread) / min(spread) >= 1.25:
+            print("Servers disagreed by %.0f%% (%.0f - %.0f Mbps) - which is exactly why\n"
+                  "this matters: the auto-pick could have been any of them."
+                  % ((max(spread) / min(spread) - 1) * 100, min(spread), max(spread)))
+        return 0
 
     now = datetime.datetime.now().astimezone()
     row = {
@@ -267,8 +395,17 @@ def main():
         print(row["error"], file=sys.stderr)
         return 2
 
+    # Learn which server represents this line before trusting a number from it.
+    # An explicit --server-id is the caller overriding that judgement, so leave
+    # the stored setting alone.
+    note = maybe_calibrate(cfg, path) if (kind == "ookla" and not args.server_id) else ""
+    if note:
+        print(note)
+    server_id = args.server_id or str(cfg.get("SERVER_ID", "")).strip() or None
+
     try:
-        result = measure_ookla(path) if kind == "ookla" else measure_speedtest_cli(path)
+        result = (measure_ookla(path, server_id=server_id) if kind == "ookla"
+                  else measure_speedtest_cli(path))
         row.update(result)
         row["status"] = "ok"
     except Exception as e:

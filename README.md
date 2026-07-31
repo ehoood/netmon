@@ -90,6 +90,8 @@ credentials to `netmon.conf` whenever you want.
 | `/setalert <percent>` · `/setalert off` | Instant alert below this % of plan |
 | `/setreport <day> <hour>` · `/setreport off` | Periodic report (day 0=Sunday) |
 | `/setping <host>` | Baseline ping target |
+| `/calibrate` | Re-check which speedtest server represents your line |
+| `/setserver <id>` · `/setserver auto` | Measure against a specific server |
 | `/setlang en\|he` | Language of reports and replies |
 | `/help` | The list above |
 
@@ -108,6 +110,9 @@ gitignored.
 | `PLAN_DOWN_MBPS` / `PLAN_UP_MBPS` | `100` / — | What your ISP sells you |
 | `INTERVAL_MINUTES` | `60` | Minutes between measurements |
 | `PING_HOST` | `1.1.1.1` | Independent baseline ping target |
+| `SERVER_ID` | — | Speedtest server to measure against; empty = auto-pick |
+| `CALIBRATE_DAYS` | `7` | Re-check which server represents your line every N days; `0` = never |
+| `CALIBRATE_SERVERS` | `4` | How many nearby servers to try when calibrating |
 | `BOT_TOKEN` / `CHAT_ID` | — | Telegram credentials |
 | `ALERTS_ENABLED` | `1` | Instant alert on a bad measurement |
 | `ALERT_THRESHOLD_PCT` | `50` | Alert below this % of plan |
@@ -121,7 +126,31 @@ From the shell:
 ```bash
 ./netmon_config.py --show
 ./netmon_config.py --set INTERVAL_MINUTES=30      # also rewrites cron
+./netmon.py --calibrate                           # re-pick the measurement server
 ```
+
+### Why calibration exists
+
+The single biggest source of wrong conclusions in speed monitoring is the
+choice of server. A speedtest measures the server, and the network path to it,
+as much as it measures your line — and the nearest server, which is what gets
+auto-selected, is not reliably a good one. One congested server produces a
+steady, believable, completely wrong number, hour after hour.
+
+The error only runs one way: a bad server can make your line look **slower**
+than it is, never faster, because no server can deliver more than the link
+carries. So the fastest server observed is the closest thing to the truth about
+what your connection can do.
+
+netmon therefore tries `CALIBRATE_SERVERS` nearby servers at install time,
+keeps the fastest as `SERVER_ID`, and measures against that one from then on —
+so the trend compares like with like instead of drifting with whichever server
+was picked that hour. It re-checks every `CALIBRATE_DAYS`, because the best
+server changes over time. `/calibrate` forces it, `/setserver <id>` pins one by
+hand, and `/setserver auto` returns to auto-selection.
+
+This makes netmon measure **capability** — what your line can deliver, which is
+what a plan is sold on — rather than the health of one nearby server.
 
 ## Reading the results
 
@@ -177,12 +206,9 @@ computed from those numbers, plus a report file you can send on.
 **A result far below the plan is not automatically your line.** A speedtest
 picks one server for you, usually the nearest, and measures that server as much
 as it measures your connection — a single congested server looks exactly like a
-capped line. Before reporting a fault, test a second and third server: if one of
-them returns a much higher number, your line clearly reaches that speed, and no
-rate limit at the lower figure can exist. `diagnose.sh` does this comparison for
-you and says so explicitly. It is also why `netmon` records `server_name` in
-every CSV row — if one name dominates your log, your trend is partly a chart of
-that server's health.
+capped line. netmon handles this for you by calibrating (see below); to
+investigate by hand, `diagnose.sh` tests several servers and says which of them
+represents your line.
 
 **Nothing is being measured** — `crontab -l` should show a netmon block. Check
 `netmon.cron.log`, and make sure the `PAUSED` file is not there (`/resume`).

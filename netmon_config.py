@@ -49,6 +49,9 @@ SCHEMA = {
     "PLAN_UP_MBPS":         ("",        "Upload speed your ISP sells you, Mbps (optional)"),
     "INTERVAL_MINUTES":     ("60",      "Minutes between automatic measurements"),
     "PING_HOST":            ("1.1.1.1", "Host for the independent baseline ping"),
+    "SERVER_ID":            ("",        "Speedtest server to measure against; empty = let the tool auto-pick"),
+    "CALIBRATE_DAYS":       ("7",       "Re-check which server best represents your line every N days; 0 = never"),
+    "CALIBRATE_SERVERS":    ("4",       "How many nearby servers to try when calibrating"),
     "BOT_TOKEN":            ("",        "Telegram bot token from @BotFather"),
     "CHAT_ID":              ("",        "Telegram chat id that may command the bot"),
     "ALERTS_ENABLED":       ("1",       "Send an instant Telegram alert on a bad measurement: 1 | 0"),
@@ -213,6 +216,29 @@ def validate(key, value):
         except ValueError:
             return False, "must be a whole number of minutes"
         return True, str(max(0, n))
+    if key == "SERVER_ID":
+        # "auto" is how a user asks for the old behaviour back; store it as empty.
+        if value == "" or value.lower() == "auto":
+            return True, ""
+        if not re.match(r"^\d{1,12}$", value):
+            return False, "must be a numeric speedtest server id, or 'auto'"
+        return True, value
+    if key == "CALIBRATE_DAYS":
+        try:
+            n = int(float(value))
+        except ValueError:
+            return False, "must be a whole number of days (0 = never)"
+        if not 0 <= n <= 365:
+            return False, "must be between 0 and 365 days"
+        return True, str(n)
+    if key == "CALIBRATE_SERVERS":
+        try:
+            n = int(float(value))
+        except ValueError:
+            return False, "must be a whole number of servers"
+        if not 2 <= n <= 10:
+            return False, "must be between 2 and 10 servers"
+        return True, str(n)
     if key == "PING_HOST":
         if not re.match(r"^[A-Za-z0-9._:-]{1,255}$", value):
             return False, "must be a hostname or IP address"
