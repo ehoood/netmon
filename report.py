@@ -66,9 +66,37 @@ def col(rows, key):
     return out
 
 
-def summarize(rows, plan, peak=(18, 24), offpeak=(2, 7)):
+def current_instrument(rows):
+    """The measurement server the most recent rows used, and how far back it goes.
+
+    Speed figures from two different servers are not comparable - the same line
+    can read 585 Mbps against one and 847 against another - so a median taken
+    across a server change describes neither. Returns (name, rows_from_it).
+    """
+    ok = [r for r in rows if r.get("status") == "ok" and r.get("server_name")]
+    if not ok:
+        return None, rows
+    name = ok[-1]["server_name"]
+    keep = []
+    for r in reversed(rows):
+        if r.get("status") == "ok" and r.get("server_name") and r["server_name"] != name:
+            break
+        keep.append(r)
+    return name, list(reversed(keep))
+
+
+def summarize(rows, plan, peak=(18, 24), offpeak=(2, 7), per_instrument=True):
     peak_hours = set(range(peak[0], peak[1]))
     off_hours = set(range(offpeak[0], offpeak[1]))
+
+    # Restrict to one instrument by default. Older rows are not discarded - they
+    # stay in the log and remain valid on their own terms - but mixing them into
+    # one median hides a change of instrument behind what looks like a change in
+    # the line.
+    all_rows = rows
+    instrument, rows = (current_instrument(rows) if per_instrument else (None, rows))
+    dropped = len(all_rows) - len(rows)
+
     ok = [r for r in rows if r.get("status") == "ok"]
     dl, ul = col(ok, "download_mbps"), col(ok, "upload_mbps")
     s = {
@@ -82,6 +110,8 @@ def summarize(rows, plan, peak=(18, 24), offpeak=(2, 7)):
         "bb_med": st.median(col(ok, "bufferbloat_ms")) if col(ok, "bufferbloat_ms") else 0,
         "loss_avg": st.mean(col(ok, "packet_loss_pct")) if col(ok, "packet_loss_pct") else 0,
         "plan": plan, "peak": peak, "offpeak": offpeak,
+        "instrument": instrument or "—",
+        "excluded": dropped,          # earlier rows, from a different server
     }
     # by-hour averages
     byh = {h: {"dl": [], "bb": [], "loss": []} for h in range(24)}
@@ -233,7 +263,13 @@ th,td{padding:8px 10px;text-align:%(side)s;border-bottom:1px solid #eee} th{back
         "ink": C_INK, "muted": C_MUTED, "vcolor": vcolor,
         "title": html.escape(t(lang, "report_title")),
         "meta": html.escape(t(lang, "report_meta", s["start"], s["end"], s["isp"], s["ok"],
-                              100 * s["ok"] / s["total"] if s["total"] else 0)),
+                              100 * s["ok"] / s["total"] if s["total"] else 0))
+                # Say which server the figures come from whenever the log holds
+                # rows from another one, so a jump in the numbers is not read as
+                # a change in the line.
+                + ("<br>" + html.escape(t(lang, "report_instrument",
+                                          s["instrument"], s["excluded"]))
+                   if s.get("excluded") else ""),
         "emoji": emoji, "head": html.escape(head), "pv": pv,
         "c_dl": card(t(lang, "card_dl"), "%.0f" % s["dl_med"], dl_pct, dl_color),
         "c_ul": card(t(lang, "card_ul"), "%.0f" % s["ul_med"], "Mbps", C_INK),

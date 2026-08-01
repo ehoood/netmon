@@ -26,6 +26,13 @@ STRINGS = {
                          "he": "דוח איכות אינטרנט"},
     "report_meta":      {"en": "%s → %s · ISP: %s · %d measurements (%.0f%% success)",
                          "he": "%s → %s · ספק: %s · %d מדידות (%.0f%% הצלחה)"},
+    "report_instrument": {"en": ("Measured against %s. %d earlier measurements used a "
+                                 "different server and are kept in the log but left out "
+                                 "of these figures — speeds from two servers cannot be "
+                                 "averaged together."),
+                          "he": ("נמדד מול %s. %d מדידות קודמות נעשו מול שרת אחר, והן "
+                                 "נשמרות בלוג אך אינן נכללות במספרים כאן — אי אפשר "
+                                 "למצע מהירויות משני שרתים שונים.")},
     "verdict_nodata":   {"en": "Not enough samples yet covering both evening and night hours.",
                          "he": "אין עדיין מספיק דגימות שמכסות גם ערב וגם לילה."},
     "verdict_bad":      {"en": "The line chokes in the evening — %.0f%% slower than at night. A classic sign of an oversubscribed shared line.",
